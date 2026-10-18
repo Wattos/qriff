@@ -8,3 +8,5 @@ pub mod jobs;
 pub mod results;
 #[cfg(target_os = "linux")]
 pub mod tray;
+
+pub mod capture;

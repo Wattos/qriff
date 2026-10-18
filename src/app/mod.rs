@@ -25,6 +25,14 @@ pub enum Message {
     CopyResult(usize),
     OpenResult(usize),
     OpenFailed(String),
+    CaptureFinished(
+        crate::jobs::JobId,
+        Result<Option<Arc<crate::capture::Prepared>>, String>,
+    ),
+    ScanFull,
+    SelectRegion,
+    CancelCrop,
+    CropSelected(crate::jobs::JobId, crate::capture::crop::PixelRect),
 }
 #[derive(Clone)]
 struct PrimarySource(Arc<Mutex<Option<Primary>>>);
@@ -37,6 +45,8 @@ struct App {
     pub state: state::State,
     primary: Arc<Mutex<Option<Primary>>>,
     decoder: Arc<crate::jobs::Decoder>,
+    screenshot: Option<Arc<crate::capture::Prepared>>,
+    selecting: bool,
 }
 pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
     let InstanceRole::Primary(primary) = primary else {
@@ -52,6 +62,8 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                 },
                 primary: primary.clone(),
                 decoder: Arc::new(crate::jobs::Decoder::new()),
+                screenshot: None,
+                selecting: false,
             };
             let task = if command == Command::Background {
                 Task::none()
@@ -68,12 +80,19 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
     .run()
 }
 impl App {
+    /// All source switches (including camera) must invalidate decode/capture work here.
+    fn reset_source(&mut self) -> crate::jobs::JobId {
+        self.decoder.cancel();
+        self.screenshot = None;
+        self.selecting = false;
+        self.state.begin_session()
+    }
     fn open(&mut self) -> Task<Message> {
         if let Some(&id) = self.state.window_ids.first() {
-            return window::gain_focus(id);
+            return window::set_mode(id, window::Mode::Windowed).chain(window::gain_focus(id));
         }
         let (id, task) = window::open(window::Settings {
-            size: iced::Size::new(460., 280.),
+            size: iced::Size::new(760., 680.),
             exit_on_close_request: true,
             ..Default::default()
         });
@@ -86,9 +105,35 @@ impl App {
             Command::Quit => iced::exit(),
             Command::Show => self.open(),
             Command::Background => Task::none(),
-            Command::ScanScreen | Command::ScanCamera => {
-                self.decoder.cancel();
-                self.state.begin_session();
+            Command::ScanScreen => {
+                let id = self.reset_source();
+                let hide = Task::batch(
+                    self.state
+                        .window_ids
+                        .iter()
+                        .map(|&window| window::set_mode(window, window::Mode::Hidden)),
+                );
+                hide.chain(Task::perform(
+                    async move {
+                        match crate::capture::screenshot()
+                            .await
+                            .map_err(|e| e.to_string())?
+                        {
+                            crate::capture::CaptureOutcome::Cancelled => Ok(None),
+                            crate::capture::CaptureOutcome::Captured(image) => {
+                                tokio::task::spawn_blocking(move || {
+                                    Some(Arc::new(crate::capture::Prepared::new(image)))
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                            }
+                        }
+                    },
+                    move |result| Message::CaptureFinished(id, result),
+                ))
+            }
+            Command::ScanCamera => {
+                self.reset_source();
                 self.state.busy = false;
                 self.state.error = Some(
                     if command == Command::ScanScreen {
@@ -113,8 +158,7 @@ impl App {
                 }
             }
             Message::WindowClosed(id) => {
-                self.decoder.cancel();
-                self.state.begin_session();
+                self.reset_source();
                 self.state.busy = false;
                 self.state.window_ids.retain(|&v| v != id);
                 if self.state.close_window() {
@@ -122,6 +166,39 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            Message::CaptureFinished(id, result) => {
+                if id.0 != self.state.session {
+                    return Task::none();
+                }
+                self.state.busy = false;
+                match result {
+                    Ok(image) => self.screenshot = image,
+                    Err(e) => self.state.error = Some(e),
+                }
+                let restore = Task::batch(
+                    self.state
+                        .window_ids
+                        .iter()
+                        .map(|&id| window::set_mode(id, window::Mode::Windowed)),
+                );
+                restore.chain(self.open())
+            }
+            Message::ScanFull => self.scan_screenshot(None),
+            Message::SelectRegion => {
+                self.selecting = true;
+                Task::none()
+            }
+            Message::CancelCrop => {
+                self.selecting = false;
+                Task::none()
+            }
+            Message::CropSelected(id, rect) => {
+                if id.0 != self.state.session {
+                    return Task::none();
+                }
+                self.selecting = false;
+                self.scan_screenshot(Some(rect))
             }
             Message::SourceUnavailable(e) => {
                 self.state.error = Some(e);
@@ -181,6 +258,31 @@ impl App {
             Message::Opened(_) => Task::none(),
         }
     }
+    fn scan_screenshot(&mut self, rect: Option<crate::capture::crop::PixelRect>) -> Task<Message> {
+        let Some(image) = self.screenshot.clone() else {
+            return Task::none();
+        };
+        self.decoder.cancel();
+        let id = self.state.begin_session();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    Arc::new(match rect {
+                        Some(r) => image
+                            .image
+                            .crop_imm(r.x, r.y, r.width, r.height)
+                            .into_luma8(),
+                        None => image.image.to_luma8(),
+                    })
+                })
+                .await
+            },
+            move |result| match result {
+                Ok(image) => Message::DecodeRequested(id, image),
+                Err(e) => Message::CaptureFinished(id, Err(e.to_string())),
+            },
+        )
+    }
     fn view(&self, _id: window::Id) -> Element<'_, Message> {
         let status = if self.state.busy {
             "Scanning…"
@@ -201,6 +303,29 @@ impl App {
             }
             results = results.push(column![text(&result.display_text), actions].spacing(4));
         }
+        let mut content = column![];
+        if let Some(image) = &self.screenshot {
+            content = content.push(
+                row![
+                    button("Scan full image").on_press(Message::ScanFull),
+                    button("Select region").on_press(Message::SelectRegion)
+                ]
+                .spacing(8),
+            );
+            if self.selecting {
+                content = content.push(text("Drag a rectangle to scan. Escape cancels selection."));
+            }
+            content = content.push(
+                iced::widget::canvas(crate::capture::preview::Preview {
+                    handle: image.handle.clone(),
+                    size: (image.image.width(), image.image.height()),
+                    session: crate::jobs::JobId(self.state.session),
+                    selecting: self.selecting,
+                })
+                .width(iced::Length::Fill)
+                .height(300),
+            );
+        }
         container(
             column![
                 text("QR Scanner").size(28),
@@ -211,6 +336,7 @@ impl App {
                 ]
                 .spacing(8),
                 text(status),
+                content,
                 scrollable(results).height(iced::Length::Fill),
                 button("Quit").on_press(Message::UserCommand(Command::Quit))
             ]
@@ -223,6 +349,16 @@ impl App {
         let primary = self.primary.clone();
         Subscription::batch([
             window::close_events().map(Message::WindowClosed),
+            iced::event::listen_with(|event, _, _| {
+                matches!(
+                    event,
+                    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                        ..
+                    })
+                )
+                .then_some(Message::CancelCrop)
+            }),
             Subscription::run_with(DecoderSource(self.decoder.clone()), decode_events),
             Subscription::run_with(PrimarySource(primary), external_events),
         ])
@@ -314,4 +450,49 @@ fn decode_events(source: &DecoderSource) -> impl iced::futures::Stream<Item = Me
             }
         }
     })
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    fn app() -> App {
+        App {
+            state: Default::default(),
+            primary: Arc::new(Mutex::new(None)),
+            decoder: Arc::new(crate::jobs::Decoder::new()),
+            screenshot: None,
+            selecting: false,
+        }
+    }
+    #[test]
+    fn reset_releases_capture_and_rejects_late_response() {
+        let mut app = app();
+        let old = app.state.begin_session();
+        let image = Arc::new(crate::capture::Prepared::new(
+            image::DynamicImage::new_rgb8(2, 2),
+        ));
+        app.screenshot = Some(image.clone());
+        app.selecting = true;
+        let id = app.reset_source();
+        assert_ne!(id, old);
+        assert!(app.screenshot.is_none());
+        assert!(!app.selecting);
+        let _ = app.update(Message::CaptureFinished(old, Ok(Some(image))));
+        assert!(app.screenshot.is_none());
+        assert!(app.state.busy);
+    }
+    #[test]
+    fn close_releases_capture() {
+        let mut app = app();
+        app.state.host_available = true;
+        app.state.windows = 1;
+        let id = iced::window::Id::unique();
+        app.state.window_ids.push(id);
+        app.screenshot = Some(Arc::new(crate::capture::Prepared::new(
+            image::DynamicImage::new_rgb8(2, 2),
+        )));
+        let _ = app.update(Message::WindowClosed(id));
+        assert!(app.screenshot.is_none());
+        assert!(!app.state.busy);
+    }
 }
