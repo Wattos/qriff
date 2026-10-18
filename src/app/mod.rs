@@ -6,7 +6,7 @@ use crate::{
 };
 use iced::{
     Element, Subscription, Task,
-    widget::{button, column, container, text},
+    widget::{button, column, container, row, scrollable, text},
     window,
 };
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,12 @@ pub enum Message {
     SourceUnavailable(String),
     WindowClosed(window::Id),
     Opened(window::Id),
+    /// Capture sources must tag frames with the ID returned by begin_session.
+    DecodeRequested(crate::jobs::JobId, Arc<image::GrayImage>),
+    DecodeFinished(Arc<crate::jobs::DecodeOutcome>),
+    CopyResult(usize),
+    OpenResult(usize),
+    OpenFailed(String),
 }
 #[derive(Clone)]
 struct PrimarySource(Arc<Mutex<Option<Primary>>>);
@@ -30,6 +36,7 @@ impl std::hash::Hash for PrimarySource {
 struct App {
     pub state: state::State,
     primary: Arc<Mutex<Option<Primary>>>,
+    decoder: Arc<crate::jobs::Decoder>,
 }
 pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
     let InstanceRole::Primary(primary) = primary else {
@@ -44,6 +51,7 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                     ..Default::default()
                 },
                 primary: primary.clone(),
+                decoder: Arc::new(crate::jobs::Decoder::new()),
             };
             let task = if command == Command::Background {
                 Task::none()
@@ -79,7 +87,8 @@ impl App {
             Command::Show => self.open(),
             Command::Background => Task::none(),
             Command::ScanScreen | Command::ScanCamera => {
-                self.state.session += 1;
+                self.decoder.cancel();
+                self.state.begin_session();
                 self.state.busy = false;
                 self.state.error = Some(
                     if command == Command::ScanScreen {
@@ -104,6 +113,9 @@ impl App {
                 }
             }
             Message::WindowClosed(id) => {
+                self.decoder.cancel();
+                self.state.begin_session();
+                self.state.busy = false;
                 self.state.window_ids.retain(|&v| v != id);
                 if self.state.close_window() {
                     iced::exit()
@@ -115,17 +127,91 @@ impl App {
                 self.state.error = Some(e);
                 Task::none()
             }
+            Message::DecodeRequested(id, image) => {
+                if id.0 == self.state.session {
+                    self.state.busy = true;
+                    self.decoder.submit(id, (*image).clone());
+                }
+                Task::none()
+            }
+            Message::DecodeFinished(outcome) => {
+                self.state.accept_decode(&outcome);
+                Task::none()
+            }
+            Message::CopyResult(index) => self
+                .state
+                .results
+                .get(index)
+                .map(|result| iced::clipboard::write(result.display_text.clone()))
+                .unwrap_or_else(Task::none),
+            Message::OpenResult(index) => {
+                let Some(url) = self
+                    .state
+                    .results
+                    .get(index)
+                    .and_then(|result| result.open_url.clone())
+                else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let status = std::process::Command::new("xdg-open")
+                                .arg(url.as_str())
+                                .status()
+                                .map_err(|e| e.to_string())?;
+                            if status.success() {
+                                Ok(())
+                            } else {
+                                Err(format!("Could not open URL: {status}"))
+                            }
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| r)
+                    },
+                    |result| result.err().map(Message::OpenFailed),
+                )
+                .and_then(Task::done)
+            }
+            Message::OpenFailed(error) => {
+                self.state.error = Some(error);
+                Task::none()
+            }
             Message::Opened(_) => Task::none(),
         }
     }
     fn view(&self, _id: window::Id) -> Element<'_, Message> {
+        let status = if self.state.busy {
+            "Scanning…"
+        } else if let Some(error) = self.state.error.as_deref() {
+            error
+        } else if self.state.scanned && self.state.results.is_empty() {
+            "No QR codes found."
+        } else if self.state.scanned {
+            "Scan complete"
+        } else {
+            "Ready"
+        };
+        let mut results = column![].spacing(12);
+        for (index, result) in self.state.results.iter().enumerate() {
+            let mut actions = row![button("Copy").on_press(Message::CopyResult(index))].spacing(8);
+            if result.open_url.is_some() {
+                actions = actions.push(button("Open").on_press(Message::OpenResult(index)));
+            }
+            results = results.push(column![text(&result.display_text), actions].spacing(4));
+        }
         container(
             column![
                 text("QR Scanner").size(28),
                 text("Scan QR codes locally from your screen or camera."),
-                button("Scan screen").on_press(Message::UserCommand(Command::ScanScreen)),
-                button("Scan camera").on_press(Message::UserCommand(Command::ScanCamera)),
-                text(self.state.error.as_deref().unwrap_or("Ready")),
+                row![
+                    button("Scan screen").on_press(Message::UserCommand(Command::ScanScreen)),
+                    button("Scan camera").on_press(Message::UserCommand(Command::ScanCamera))
+                ]
+                .spacing(8),
+                text(status),
+                scrollable(results).height(iced::Length::Fill),
                 button("Quit").on_press(Message::UserCommand(Command::Quit))
             ]
             .spacing(12),
@@ -137,6 +223,7 @@ impl App {
         let primary = self.primary.clone();
         Subscription::batch([
             window::close_events().map(Message::WindowClosed),
+            Subscription::run_with(DecoderSource(self.decoder.clone()), decode_events),
             Subscription::run_with(PrimarySource(primary), external_events),
         ])
     }
@@ -208,4 +295,29 @@ fn external_events(source: &PrimarySource) -> impl iced::futures::Stream<Item = 
             drop(tray);
         },
     )
+}
+
+#[derive(Clone)]
+struct DecoderSource(Arc<crate::jobs::Decoder>);
+impl std::hash::Hash for DecoderSource {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.0), h);
+    }
+}
+fn decode_events(source: &DecoderSource) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let mut outcomes = source.0.subscribe();
+    iced::stream::channel(1, async move |mut output| {
+        use iced::futures::SinkExt;
+        loop {
+            if outcomes.changed().await.is_err() {
+                break;
+            }
+            let outcome = outcomes.borrow_and_update().clone();
+            if let Some(outcome) = outcome
+                && output.send(Message::DecodeFinished(outcome)).await.is_err()
+            {
+                break;
+            }
+        }
+    })
 }

@@ -1,7 +1,10 @@
 #[cfg(target_os = "linux")]
 pub mod app;
 pub mod cli;
+pub mod decode;
 #[cfg(target_os = "linux")]
 pub mod instance;
+pub mod jobs;
+pub mod results;
 #[cfg(target_os = "linux")]
 pub mod tray;
