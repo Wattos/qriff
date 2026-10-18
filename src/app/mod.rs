@@ -130,7 +130,7 @@ impl App {
             Message::DecodeRequested(id, image) => {
                 if id.0 == self.state.session {
                     self.state.busy = true;
-                    self.decoder.submit(id, (*image).clone());
+                    self.decoder.submit(id, image);
                 }
                 Task::none()
             }
@@ -308,14 +308,8 @@ fn decode_events(source: &DecoderSource) -> impl iced::futures::Stream<Item = Me
     let mut outcomes = source.0.subscribe();
     iced::stream::channel(1, async move |mut output| {
         use iced::futures::SinkExt;
-        loop {
-            if outcomes.changed().await.is_err() {
-                break;
-            }
-            let outcome = outcomes.borrow_and_update().clone();
-            if let Some(outcome) = outcome
-                && output.send(Message::DecodeFinished(outcome)).await.is_err()
-            {
+        while let Some(outcome) = outcomes.recv().await {
+            if output.send(Message::DecodeFinished(outcome)).await.is_err() {
                 break;
             }
         }
