@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=QR Scanner
+Comment=Read QR codes locally
+Exec=qr-scanner
+Icon=qr-scanner
+Terminal=false
+Categories=Utility;Graphics;
+StartupNotify=true
