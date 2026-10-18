@@ -3,6 +3,10 @@ name = "qr-scanner"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Optional comparison backend; tiny-skia remains available as a fallback.
+gpu = ["iced/wgpu"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

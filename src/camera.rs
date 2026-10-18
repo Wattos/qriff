@@ -293,7 +293,7 @@ impl Source for Native {
             packed_rows(
                 bytes,
                 row,
-                (self.format.stride as usize).max(row),
+                self.format.stride as usize,
                 self.format.height as usize,
             )?
         };
@@ -317,6 +317,7 @@ fn packed_rows(
     stride: usize,
     height: usize,
 ) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
+    let stride = if stride == 0 { row } else { stride };
     anyhow::ensure!(
         row > 0 && stride >= row && height > 0,
         "Malformed camera row stride"
@@ -428,6 +429,10 @@ mod tests {
         );
         assert!(packed_rows(&[0; 5], 3, 4, 2).is_err());
         assert!(packed_rows(&[0; 8], 3, 2, 2).is_err());
+        assert_eq!(
+            packed_rows(&[1, 2, 3, 4, 5, 6], 3, 0, 2).unwrap().as_ref(),
+            &[1, 2, 3, 4, 5, 6]
+        );
     }
     #[test]
     fn bounded_latest_frame_replaces_obsolete_preview() {

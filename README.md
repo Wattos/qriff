@@ -41,10 +41,29 @@ directory must be owned by the current user and private (0700). A lifetime file
 lock protects socket creation and stale recovery. The lock file deliberately
 remains after exit; it must never be deleted while any instance is running.
 
-The files in `assets/` provide a desktop entry and SVG icon for eventual native
-packaging. They are not installed automatically. For a local desktop entry,
-replace its Exec with the absolute path to the built binary and its Icon with
-the absolute path to `assets/qr-scanner.svg` before installing it.
+Install for the current user after building a release (no root needed):
+
+```sh
+cargo build --release
+install -Dm755 target/release/qr-scanner "$HOME/.local/bin/qr-scanner"
+install -Dm644 assets/qr-scanner.svg "$HOME/.local/share/icons/hicolor/scalable/apps/qr-scanner.svg"
+mkdir -p "$HOME/.local/share/applications"
+sed "s|^Exec=.*|Exec=\"$HOME/.local/bin/qr-scanner\"|" assets/qr-scanner.desktop > "$HOME/.local/share/applications/qr-scanner.desktop"
+```
+
+The generated desktop entry uses the installed binary's absolute path; terminal
+commands require `$HOME/.local/bin` in PATH. Remove those three installed files
+to uninstall. The launcher opens the normal main window.
+
+Install and enable `xdg-desktop-portal` plus the backend matching your session:
+KDE uses `xdg-desktop-portal-kde`; GNOME uses `xdg-desktop-portal-gnome`.
+Hyprland normally uses its portal backend; Sway commonly uses
+`xdg-desktop-portal-wlr`. Confirm that your backend actually implements the
+Screenshot portal; screencast support alone is insufficient. Desktop selection
+and backend routing use the session's `XDG_CURRENT_DESKTOP` and portal
+`portals.conf`; consult the distribution's session configuration if capture fails.
+GNOME tray support needs an optional AppIndicator/StatusNotifierItem extension
+(such as Ubuntu AppIndicators); without one the application uses its window.
 
 No scan history, telemetry, autostart, network decoding, or automatic link opening
 is included. The idle shell does no camera capture or screen polling.
@@ -64,7 +83,7 @@ startup and closing without a tray, tray menu and host changes, command forwardi
 screenshot permission/cancellation and camera release. These desktops have not
 been manually verified. Physical portal/crop interaction, clipboard and camera QR
 acceptance still need manual verification; native camera read/stop/reopen was
-probed on the development machine. Performance benchmarks remain future work.
+probed on the development machine. Release measurements and the explicit acceptance matrix are in [docs/verification.md](docs/verification.md).
 
 ## Camera scanning
 
@@ -90,3 +109,16 @@ an error and releases the device; use the selector or Scan camera to reopen it.
 Permission denial, busy/unplugged devices, and unsupported formats surface as
 camera errors. Direct device access requires permission to open `/dev/video*`;
 Flatpak Camera portal/PipeWire integration is future work.
+
+## Rendering and capture follow-up
+
+The default build uses tiny-skia. For an optional GPU comparison build, use
+`cargo build --release --features gpu`; select `ICED_BACKEND=wgpu` or
+`ICED_BACKEND=tiny-skia`. See the measurements before choosing a backend.
+
+A future capture flow should try noninteractive portal capture and show region
+selection only when needed. KDE's current screenshot backend has a
+noninteractive branch for `interactive=false`, but portal frontend permissions
+can still prompt. This does not establish universally dialog-free capture.
+The current app retains the verified interactive portal flow; improving its
+visual integration and main-window polish remains follow-up work.
