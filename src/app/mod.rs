@@ -29,6 +29,13 @@ pub enum Message {
         crate::jobs::JobId,
         Result<Option<Arc<crate::capture::Prepared>>, String>,
     ),
+    CameraOutcome(Arc<crate::camera::Outcome>),
+    CameraDevices(
+        crate::jobs::JobId,
+        Result<Vec<crate::camera::Device>, String>,
+    ),
+    SelectCamera(crate::camera::Device),
+    StopCamera,
     ScanFull,
     SelectRegion,
     CancelCrop,
@@ -46,6 +53,12 @@ struct App {
     primary: Arc<Mutex<Option<Primary>>>,
     decoder: Arc<crate::jobs::Decoder>,
     screenshot: Option<Arc<crate::capture::Prepared>>,
+    camera_preview: Option<iced::widget::image::Handle>,
+    camera: Option<Arc<crate::camera::CameraSession>>,
+    retiring_cameras: Vec<Arc<crate::camera::CameraSession>>,
+    camera_devices: Vec<crate::camera::Device>,
+    selected_camera: Option<crate::camera::Device>,
+    camera_mode: bool,
     selecting: bool,
     crop_epoch: u64,
     pending_capture: Option<crate::jobs::JobId>,
@@ -66,6 +79,12 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                 primary: primary.clone(),
                 decoder: Arc::new(crate::jobs::Decoder::new()),
                 screenshot: None,
+                camera_preview: None,
+                camera: None,
+                retiring_cameras: Vec::new(),
+                camera_devices: Vec::new(),
+                selected_camera: None,
+                camera_mode: false,
                 selecting: false,
                 crop_epoch: 0,
                 pending_capture: None,
@@ -89,6 +108,12 @@ impl App {
     /// All source switches (including camera) must invalidate decode/capture work here.
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.decoder.cancel();
+        if let Some(camera) = self.camera.take() {
+            camera.stop();
+            self.retiring_cameras.push(camera);
+        }
+        self.camera_preview = None;
+        self.camera_mode = false;
         self.pending_capture = None;
         self.screenshot = None;
         self.selecting = false;
@@ -130,7 +155,10 @@ impl App {
     }
     fn command(&mut self, command: Command) -> Task<Message> {
         match command {
-            Command::Quit => iced::exit(),
+            Command::Quit => {
+                self.reset_source();
+                iced::exit()
+            }
             Command::Show if self.pending_capture.is_some() => Task::none(),
             Command::Show => self.open(),
             Command::Background => Task::none(),
@@ -147,17 +175,18 @@ impl App {
                 }
             }
             Command::ScanCamera => {
-                self.reset_source();
-                self.state.busy = false;
-                self.state.error = Some(
-                    if command == Command::ScanScreen {
-                        "Screen capture is not implemented yet."
-                    } else {
-                        "Camera capture is not implemented yet."
-                    }
-                    .into(),
+                let id = self.reset_source();
+                self.camera_mode = true;
+                let enumerate = Task::perform(
+                    async {
+                        tokio::task::spawn_blocking(crate::camera::devices)
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r.map_err(|e| e.to_string()))
+                    },
+                    move |r| Message::CameraDevices(id, r),
                 );
-                self.open()
+                Task::batch([self.open(), enumerate])
             }
         }
     }
@@ -281,8 +310,79 @@ impl App {
                 self.state.error = Some(error);
                 Task::none()
             }
+            Message::CameraDevices(id, result) => {
+                if id.0 != self.state.session {
+                    return Task::none();
+                }
+                self.state.busy = false;
+                match result {
+                    Ok(devices) if !devices.is_empty() => {
+                        self.camera_devices = devices;
+                        self.start_camera(self.camera_devices[0].clone())
+                    }
+                    Ok(_) => {
+                        self.state.error = Some("No supported camera found.".into());
+                        Task::none()
+                    }
+                    Err(error) => {
+                        self.state.error = Some(format!("Camera unavailable: {error}"));
+                        Task::none()
+                    }
+                }
+            }
+            Message::SelectCamera(device) => self.start_camera(device),
+            Message::StopCamera => {
+                self.reset_source();
+                self.state.busy = false;
+                Task::none()
+            }
+            Message::CameraOutcome(outcome) => {
+                if outcome.id.0 != self.state.session {
+                    return Task::none();
+                }
+                match &outcome.event {
+                    crate::camera::Event::Frame { preview, gray } => {
+                        if let Some(preview) = preview {
+                            self.camera_preview = Some(preview.clone());
+                        }
+                        if let Some(image) = gray {
+                            self.decoder.submit(outcome.id, image.clone());
+                        }
+                    }
+                    crate::camera::Event::Error(error) => {
+                        // A completed decode may already be queued in the UI. End the
+                        // source generation without discarding results found so far.
+                        self.decoder.cancel();
+                        self.state.session = self.state.session.wrapping_add(1);
+                        self.camera_preview = None;
+                        self.state.busy = false;
+                        self.state.error = Some(format!("Camera failed: {error}"));
+                        self.camera = None;
+                    }
+                    crate::camera::Event::Stopped => {
+                        self.camera_preview = None;
+                        self.state.busy = false;
+                        self.camera = None;
+                    }
+                }
+                Task::none()
+            }
             Message::Opened(_) => Task::none(),
         }
+    }
+    fn start_camera(&mut self, device: crate::camera::Device) -> Task<Message> {
+        let id = self.reset_source();
+        self.camera_mode = true;
+        self.selected_camera = Some(device.clone());
+        match crate::camera::start_after(&device.id, id, std::mem::take(&mut self.retiring_cameras))
+        {
+            Ok(camera) => self.camera = Some(Arc::new(camera)),
+            Err(error) => {
+                self.state.busy = false;
+                self.state.error = Some(format!("Camera failed: {error}"));
+            }
+        }
+        Task::none()
     }
     fn scan_screenshot(&mut self, rect: Option<crate::capture::crop::PixelRect>) -> Task<Message> {
         let Some(image) = self.screenshot.clone() else {
@@ -310,7 +410,9 @@ impl App {
         )
     }
     fn view(&self, _id: window::Id) -> Element<'_, Message> {
-        let status = if self.state.busy {
+        let status = if self.camera.is_some() && self.state.error.is_none() {
+            "Camera scanning…"
+        } else if self.state.busy {
             "Scanning…"
         } else if let Some(error) = self.state.error.as_deref() {
             error
@@ -330,6 +432,28 @@ impl App {
             results = results.push(column![text(&result.display_text), actions].spacing(4));
         }
         let mut content = column![];
+        if self.camera_mode {
+            content = content.push(
+                row![
+                    iced::widget::pick_list(
+                        self.camera_devices.as_slice(),
+                        self.selected_camera.as_ref(),
+                        Message::SelectCamera
+                    )
+                    .placeholder("Select camera"),
+                    button("Stop camera").on_press(Message::StopCamera)
+                ]
+                .spacing(8),
+            );
+            if let Some(handle) = &self.camera_preview {
+                content = content.push(
+                    iced::widget::image(handle.clone())
+                        .height(300)
+                        .width(iced::Length::Fill)
+                        .content_fit(iced::ContentFit::Contain),
+                );
+            }
+        }
         if let Some(image) = &self.screenshot {
             content = content.push(
                 row![
@@ -374,7 +498,13 @@ impl App {
     }
     fn subscription(&self) -> Subscription<Message> {
         let primary = self.primary.clone();
+        let camera_subscription = if let Some(camera) = &self.camera {
+            Subscription::run_with(CameraSource(camera.clone()), camera_events)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
+            camera_subscription,
             window::close_events().map(Message::WindowClosed),
             iced::event::listen_with(|event, _, _| {
                 matches!(
@@ -461,6 +591,31 @@ fn external_events(source: &PrimarySource) -> impl iced::futures::Stream<Item = 
 }
 
 #[derive(Clone)]
+struct CameraSource(Arc<crate::camera::CameraSession>);
+impl std::hash::Hash for CameraSource {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.0), h);
+    }
+}
+fn camera_events(source: &CameraSource) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let mut incoming = source.0.subscribe();
+    iced::stream::channel(1, async move |mut output| {
+        use iced::futures::SinkExt;
+        loop {
+            let outcome = incoming.borrow_and_update().clone();
+            if let Some(outcome) = outcome
+                && output.send(Message::CameraOutcome(outcome)).await.is_err()
+            {
+                break;
+            }
+            if incoming.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+#[derive(Clone)]
 struct DecoderSource(Arc<crate::jobs::Decoder>);
 impl std::hash::Hash for DecoderSource {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
@@ -488,6 +643,12 @@ mod capture_tests {
             primary: Arc::new(Mutex::new(None)),
             decoder: Arc::new(crate::jobs::Decoder::new()),
             screenshot: None,
+            camera_preview: None,
+            camera: None,
+            retiring_cameras: Vec::new(),
+            camera_devices: Vec::new(),
+            selected_camera: None,
+            camera_mode: false,
             selecting: false,
             crop_epoch: 0,
             pending_capture: None,
@@ -510,6 +671,46 @@ mod capture_tests {
         let _ = app.update(Message::CaptureFinished(old, Ok(Some(image))));
         assert!(app.screenshot.is_none());
         assert!(app.state.busy);
+    }
+    #[test]
+    fn camera_failure_cannot_be_overwritten_by_a_queued_decode() {
+        let mut app = app();
+        let id = app.state.begin_session();
+        let _ = app.update(Message::CameraOutcome(Arc::new(crate::camera::Outcome {
+            id,
+            event: crate::camera::Event::Error("unplugged".into()),
+        })));
+        let _ = app.update(Message::DecodeFinished(Arc::new(
+            crate::jobs::DecodeOutcome {
+                id,
+                result: Ok(vec![]),
+            },
+        )));
+        assert_eq!(app.state.error.as_deref(), Some("Camera failed: unplugged"));
+        assert!(!app.state.busy);
+    }
+    #[test]
+    fn camera_frames_after_close_or_stop_cannot_restore_preview() {
+        let mut app = app();
+        let window = window::Id::unique();
+        app.state.window_ids.push(window);
+        app.state.windows = 1;
+        app.state.host_available = true;
+        let old = app.state.begin_session();
+        let frame = Arc::new(crate::camera::Outcome {
+            id: old,
+            event: crate::camera::Event::Frame {
+                preview: Some(iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4])),
+                gray: Some(Arc::new(image::GrayImage::new(1, 1))),
+            },
+        });
+        let _ = app.update(Message::CameraOutcome(frame.clone()));
+        assert!(app.camera_preview.is_some());
+        let _ = app.update(Message::WindowClosed(window));
+        assert!(app.camera_preview.is_none());
+        let _ = app.update(Message::CameraOutcome(frame));
+        assert!(app.camera_preview.is_none());
+        assert!(!app.state.busy);
     }
     #[test]
     fn close_releases_capture() {

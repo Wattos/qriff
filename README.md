@@ -2,7 +2,8 @@
 
 A Linux-first local QR scanner built with Rust and Iced. The current shell has a
 main window, a StatusNotifierItem tray menu, and single-instance command routing.
-Screen and camera actions currently display an implementation-pending message.
+Scan a portal screenshot, crop a region, or scan continuously from a local camera.
+Results stay in memory and offer explicit Copy and safe HTTP/HTTPS Open actions.
 
 ## Build and run
 
@@ -12,7 +13,10 @@ libraries and xkbcommon development files (Debian/Ubuntu: build-essential,
 pkg-config, libwayland-dev, libxkbcommon-dev, libx11-dev, libxcursor-dev,
 libxi-dev, libxrandr-dev). Check installed prerequisites before installing packages.
 The current renderer is Iced's software tiny-skia backend; no GPU backend is
-compiled by default. Capture and camera dependencies will add prerequisites later.
+compiled by default. Native camera builds also need libclang and Linux V4L2
+headers (Debian/Ubuntu: libclang-dev, linux-libc-dev). The direct V4L2 backend
+does not need libudev-dev or libv4l-dev. Screenshot capture uses the desktop
+portal and its installed screenshot backend.
 
 ```sh
 cargo build
@@ -57,6 +61,32 @@ process smoke checks are separate from visual acceptance.
 GNOME needs a StatusNotifierItem extension for a tray. Hyprland and Sway need a
 compatible panel and portal backend. On each desktop check normal launcher
 startup and closing without a tray, tray menu and host changes, command forwarding,
-and later screenshot permission/cancellation and camera release. These desktops
-have not been manually verified. Capture, crop, decoding, camera, and benchmarks
-remain subsequent implementation work.
+screenshot permission/cancellation and camera release. These desktops have not
+been manually verified. Physical portal/crop interaction, clipboard and camera QR
+acceptance still need manual verification; native camera read/stop/reopen was
+probed on the development machine. Performance benchmarks remain future work.
+
+## Camera scanning
+
+Scan camera opens a device selector and live preview. Stop camera, switching to
+screen scanning, closing the window, and Quit release capture resources. A new
+camera selection waits for the previous worker to release its device. Repeated
+payloads appear once per scanning session; no frames or results are saved.
+
+Native Linux capture is enabled in the normal build. It uses the safe Rust v4l
+API with bounded waits and nokhwa-core pixel conversion. Nokhwa native capture
+was evaluated successfully on the Integrated RGB Camera, but its Linux stream
+has no exposed read timeout, preventing reliable stop if a camera stalls.
+
+The app requests 640×480, accepts the driver's nearest mode up to 1080p, and
+prefers MJPEG, then YUYV, RGB, or grayscale. It requests 15 camera frames per
+second; drivers may clamp that request. Obsolete raw frames are discarded before
+conversion, previews are limited to 15/s, and QR submissions to 5/s. Delivery
+retains only the newest frame while completed QR results remain lossless.
+
+Capture startup can wait up to one second; subsequent frame waits are bounded
+at 500 ms so low-light delays do not immediately fail. A stalled stream reports
+an error and releases the device; use the selector or Scan camera to reopen it.
+Permission denial, busy/unplugged devices, and unsupported formats surface as
+camera errors. Direct device access requires permission to open `/dev/video*`;
+Flatpak Camera portal/PipeWire integration is future work.

@@ -10,3 +10,6 @@ pub mod results;
 pub mod tray;
 
 pub mod capture;
+
+#[cfg(target_os = "linux")]
+pub mod camera;

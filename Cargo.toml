@@ -21,6 +21,10 @@ rqrr = "0.11.0"
 url = "2.5.8"
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screenshot"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = "0.14"
+nokhwa-core = { version = "0.1.9", features = ["mjpeg"] }
+
 [dev-dependencies]
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 tempfile = "3"
