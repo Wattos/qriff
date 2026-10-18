@@ -47,6 +47,9 @@ struct App {
     decoder: Arc<crate::jobs::Decoder>,
     screenshot: Option<Arc<crate::capture::Prepared>>,
     selecting: bool,
+    crop_epoch: u64,
+    pending_capture: Option<crate::jobs::JobId>,
+    temporary_closes: std::collections::HashSet<window::Id>,
 }
 pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
     let InstanceRole::Primary(primary) = primary else {
@@ -64,6 +67,9 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                 decoder: Arc::new(crate::jobs::Decoder::new()),
                 screenshot: None,
                 selecting: false,
+                crop_epoch: 0,
+                pending_capture: None,
+                temporary_closes: Default::default(),
             };
             let task = if command == Command::Background {
                 Task::none()
@@ -83,8 +89,10 @@ impl App {
     /// All source switches (including camera) must invalidate decode/capture work here.
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.decoder.cancel();
+        self.pending_capture = None;
         self.screenshot = None;
         self.selecting = false;
+        self.crop_epoch = self.crop_epoch.wrapping_add(1);
         self.state.begin_session()
     }
     fn open(&mut self) -> Task<Message> {
@@ -100,37 +108,43 @@ impl App {
         self.state.windows = self.state.window_ids.len();
         task.map(Message::Opened)
     }
+    fn capture_task(id: crate::jobs::JobId) -> Task<Message> {
+        Task::perform(
+            async move {
+                match crate::capture::screenshot()
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    crate::capture::CaptureOutcome::Cancelled => Ok(None),
+                    crate::capture::CaptureOutcome::Captured(image) => {
+                        tokio::task::spawn_blocking(move || {
+                            Some(Arc::new(crate::capture::Prepared::new(image)))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                    }
+                }
+            },
+            move |result| Message::CaptureFinished(id, result),
+        )
+    }
     fn command(&mut self, command: Command) -> Task<Message> {
         match command {
             Command::Quit => iced::exit(),
+            Command::Show if self.pending_capture.is_some() => Task::none(),
             Command::Show => self.open(),
             Command::Background => Task::none(),
             Command::ScanScreen => {
                 let id = self.reset_source();
-                let hide = Task::batch(
-                    self.state
-                        .window_ids
-                        .iter()
-                        .map(|&window| window::set_mode(window, window::Mode::Hidden)),
-                );
-                hide.chain(Task::perform(
-                    async move {
-                        match crate::capture::screenshot()
-                            .await
-                            .map_err(|e| e.to_string())?
-                        {
-                            crate::capture::CaptureOutcome::Cancelled => Ok(None),
-                            crate::capture::CaptureOutcome::Captured(image) => {
-                                tokio::task::spawn_blocking(move || {
-                                    Some(Arc::new(crate::capture::Prepared::new(image)))
-                                })
-                                .await
-                                .map_err(|e| e.to_string())
-                            }
-                        }
-                    },
-                    move |result| Message::CaptureFinished(id, result),
-                ))
+                self.pending_capture = Some(id);
+                let windows = std::mem::take(&mut self.state.window_ids);
+                self.state.windows = 0;
+                self.temporary_closes.extend(windows.iter().copied());
+                if self.temporary_closes.is_empty() {
+                    Self::capture_task(id)
+                } else {
+                    Task::batch(windows.into_iter().map(window::close))
+                }
             }
             Command::ScanCamera => {
                 self.reset_source();
@@ -151,13 +165,28 @@ impl App {
         match message {
             Message::UserCommand(c) | Message::InstanceCommand(c) => self.command(c),
             Message::TrayHostChanged(available) => {
-                if self.state.host_changed(available) {
+                if self.state.host_changed(available) && self.pending_capture.is_none() {
                     self.open()
                 } else {
                     Task::none()
                 }
             }
             Message::WindowClosed(id) => {
+                // Iced broadcasts Closed after removing the runtime window. Winit's
+                // Wayland loop processes its destruction before the AboutToWait
+                // phase in which Iced broadcasts these close events.
+                if self.temporary_closes.remove(&id) {
+                    return if self.temporary_closes.is_empty() {
+                        self.pending_capture
+                            .map(Self::capture_task)
+                            .unwrap_or_else(Task::none)
+                    } else {
+                        Task::none()
+                    };
+                }
+                if !self.state.window_ids.contains(&id) {
+                    return Task::none();
+                }
                 self.reset_source();
                 self.state.busy = false;
                 self.state.window_ids.retain(|&v| v != id);
@@ -171,25 +200,22 @@ impl App {
                 if id.0 != self.state.session {
                     return Task::none();
                 }
+                self.pending_capture = None;
                 self.state.busy = false;
                 match result {
                     Ok(image) => self.screenshot = image,
                     Err(e) => self.state.error = Some(e),
                 }
-                let restore = Task::batch(
-                    self.state
-                        .window_ids
-                        .iter()
-                        .map(|&id| window::set_mode(id, window::Mode::Windowed)),
-                );
-                restore.chain(self.open())
+                self.open()
             }
             Message::ScanFull => self.scan_screenshot(None),
             Message::SelectRegion => {
+                self.crop_epoch = self.crop_epoch.wrapping_add(1);
                 self.selecting = true;
                 Task::none()
             }
             Message::CancelCrop => {
+                self.crop_epoch = self.crop_epoch.wrapping_add(1);
                 self.selecting = false;
                 Task::none()
             }
@@ -321,6 +347,7 @@ impl App {
                     size: (image.image.width(), image.image.height()),
                     session: crate::jobs::JobId(self.state.session),
                     selecting: self.selecting,
+                    epoch: self.crop_epoch,
                 })
                 .width(iced::Length::Fill)
                 .height(300),
@@ -455,13 +482,16 @@ fn decode_events(source: &DecoderSource) -> impl iced::futures::Stream<Item = Me
 #[cfg(test)]
 mod capture_tests {
     use super::*;
-    fn app() -> App {
+    pub(super) fn app() -> App {
         App {
             state: Default::default(),
             primary: Arc::new(Mutex::new(None)),
             decoder: Arc::new(crate::jobs::Decoder::new()),
             screenshot: None,
             selecting: false,
+            crop_epoch: 0,
+            pending_capture: None,
+            temporary_closes: Default::default(),
         }
     }
     #[test]
@@ -494,5 +524,71 @@ mod capture_tests {
         let _ = app.update(Message::WindowClosed(id));
         assert!(app.screenshot.is_none());
         assert!(!app.state.busy);
+    }
+}
+
+#[cfg(test)]
+mod temporary_capture_tests {
+    use super::capture_tests::app;
+    use super::*;
+    #[test]
+    fn intentional_last_window_close_preserves_capture_session() {
+        let mut app = app();
+        let window = window::Id::unique();
+        app.state.window_ids.push(window);
+        app.state.windows = 1;
+        let _ = app.command(Command::ScanScreen);
+        let session = app.state.session;
+        assert!(app.temporary_closes.contains(&window));
+        assert!(app.state.window_ids.is_empty());
+        assert_eq!(app.state.windows, 0);
+        let _ = app.update(Message::WindowClosed(window));
+        assert_eq!(app.state.session, session);
+        assert!(app.state.busy);
+        assert!(app.temporary_closes.is_empty());
+        assert_eq!(app.pending_capture, Some(crate::jobs::JobId(session)));
+        let _ = app.update(Message::CaptureFinished(
+            crate::jobs::JobId(session),
+            Ok(None),
+        ));
+        assert!(!app.state.busy);
+        assert_eq!(app.state.window_ids.len(), 1);
+        assert!(app.pending_capture.is_none());
+    }
+    #[test]
+    fn waits_for_every_close_and_restores_after_failure() {
+        let mut app = app();
+        let first = window::Id::unique();
+        let second = window::Id::unique();
+        app.state.window_ids = vec![first, second];
+        app.state.windows = 2;
+        let _ = app.command(Command::ScanScreen);
+        let id = crate::jobs::JobId(app.state.session);
+        assert_eq!(app.update(Message::WindowClosed(first)).units(), 0);
+        assert_eq!(app.update(Message::TrayHostChanged(false)).units(), 0);
+        assert_eq!(app.command(Command::Show).units(), 0);
+        assert!(app.state.window_ids.is_empty());
+        assert!(app.update(Message::WindowClosed(second)).units() > 0);
+        assert_eq!(app.state.session, id.0);
+        let _ = app.update(Message::CaptureFinished(id, Err("denied".into())));
+        assert_eq!(app.state.error.as_deref(), Some("denied"));
+        assert!(!app.state.busy);
+        assert_eq!(app.state.window_ids.len(), 1);
+    }
+    #[test]
+    fn source_switch_during_temporary_close_ignores_old_completion() {
+        let mut app = app();
+        let window = window::Id::unique();
+        app.state.window_ids.push(window);
+        app.state.windows = 1;
+        let _ = app.command(Command::ScanScreen);
+        let old = crate::jobs::JobId(app.state.session);
+        let _ = app.command(Command::ScanCamera);
+        let session = app.state.session;
+        let _ = app.update(Message::WindowClosed(window));
+        assert_eq!(app.state.session, session);
+        assert_eq!(app.state.window_ids.len(), 1);
+        let _ = app.update(Message::CaptureFinished(old, Err("old failure".into())));
+        assert_ne!(app.state.error.as_deref(), Some("old failure"));
     }
 }

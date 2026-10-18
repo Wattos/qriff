@@ -8,9 +8,11 @@ pub struct Preview {
     pub size: (u32, u32),
     pub session: crate::jobs::JobId,
     pub selecting: bool,
+    pub epoch: u64,
 }
 #[derive(Default)]
 pub struct Drag {
+    key: Option<(crate::jobs::JobId, u64)>,
     start: Option<Point>,
     end: Option<Point>,
 }
@@ -34,6 +36,13 @@ impl canvas::Program<Message> for Preview {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<iced::widget::Action<Message>> {
+        let key = Some((self.session, self.epoch));
+        if state.key != key || !self.selecting {
+            *state = Drag {
+                key,
+                ..Default::default()
+            };
+        }
         if !self.selecting {
             return None;
         }
@@ -78,7 +87,10 @@ impl canvas::Program<Message> for Preview {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         frame.draw_image(fitted(self.size, bounds), &self.handle);
-        if let (Some(a), Some(b)) = (state.start, state.end) {
+        if self.selecting
+            && state.key == Some((self.session, self.epoch))
+            && let (Some(a), Some(b)) = (state.start, state.end)
+        {
             let path = Path::rectangle(
                 Point::new(a.x.min(b.x), a.y.min(b.y)),
                 iced::Size::new((a.x - b.x).abs(), (a.y - b.y).abs()),
@@ -91,5 +103,50 @@ impl canvas::Program<Message> for Preview {
             );
         }
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas::Program;
+    #[test]
+    fn escape_then_reselect_cannot_finish_previous_drag() {
+        let mut preview = Preview {
+            handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]),
+            size: (100, 100),
+            session: crate::jobs::JobId(1),
+            selecting: true,
+            epoch: 0,
+        };
+        let mut drag = Drag::default();
+        let bounds = Rectangle::new(Point::ORIGIN, iced::Size::new(100., 100.));
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let release = canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        preview.update(
+            &mut drag,
+            &press,
+            bounds,
+            mouse::Cursor::Available(Point::new(10., 10.)),
+        );
+        let escape = canvas::Event::Mouse(mouse::Event::CursorMoved {
+            position: Point::ORIGIN,
+        });
+        preview.selecting = false;
+        preview.epoch += 1;
+        preview.update(&mut drag, &escape, bounds, mouse::Cursor::Unavailable);
+        preview.selecting = true;
+        preview.epoch += 1;
+        assert!(
+            preview
+                .update(
+                    &mut drag,
+                    &release,
+                    bounds,
+                    mouse::Cursor::Available(Point::new(90., 90.))
+                )
+                .is_none()
+        );
+        assert!(drag.start.is_none());
     }
 }
