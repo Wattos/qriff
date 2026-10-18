@@ -9,12 +9,14 @@ pub struct State {
     pub error: Option<String>,
     pub results: Vec<crate::results::QrResult>,
     pub scanned: bool,
+    pub capture_cancelled: bool,
 }
 impl State {
     pub fn begin_session(&mut self) -> crate::jobs::JobId {
         self.session = self.session.wrapping_add(1);
         self.busy = true;
         self.scanned = false;
+        self.capture_cancelled = false;
         self.error = None;
         self.results.clear();
         crate::jobs::JobId(self.session)

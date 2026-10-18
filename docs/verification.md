@@ -71,9 +71,18 @@ one-run observations; no significance or worst-case guarantee is claimed.
 | 3840×2160 | 10 | 64.350 | 65.118 | 66.095 |
 
 Required checks all passed: `cargo fmt --check`,
-`cargo clippy --all-targets -- -D warnings`, `cargo test` (37 unit and 8
-integration tests), `cargo build --release`. Optional GPU release build and
-`cargo clippy --all-targets --all-features -- -D warnings` also passed.
+`cargo clippy --all-targets -- -D warnings`, `cargo test` (40 unit and 8
+integration tests), `cargo build --release`. The earlier optional GPU release
+build and `cargo clippy --all-targets --all-features -- -D warnings` also passed;
+those optional checks were not repeated in the final fix wave.
+Final review fixes were rechecked with the default fmt, clippy, full Rust test
+suite and release build; the runtime probe regression also passes with
+`python3 -m unittest discover -s tools -p 'test_measure_runtime.py'` (1 test).
+Successful screen capture now schedules decoding immediately; Stop retains
+results while rejecting stale camera/decode work; cancelled capture has distinct
+feedback. This verification did not repeat benchmarks or physical acceptance;
+the measurements above remain historical short observations.
+
 `desktop-file-validate assets/qr-scanner.desktop` passed. The SVG icon and entry
 are delivery assets; their installed launcher appearance remains unverified.
 

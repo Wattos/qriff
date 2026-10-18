@@ -30,5 +30,6 @@ v4l = "0.14"
 nokhwa-core = { version = "0.1.9", features = ["mjpeg"] }
 
 [dev-dependencies]
+iced_runtime = "0.14"
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 tempfile = "3"

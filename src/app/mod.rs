@@ -107,6 +107,11 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
 impl App {
     /// All source switches (including camera) must invalidate decode/capture work here.
     fn reset_source(&mut self) -> crate::jobs::JobId {
+        self.invalidate_source();
+        self.state.begin_session()
+    }
+    /// Stop capture and invalidate queued messages while retaining visible results.
+    fn invalidate_source(&mut self) {
         self.decoder.cancel();
         if let Some(camera) = self.camera.take() {
             camera.stop();
@@ -118,7 +123,8 @@ impl App {
         self.screenshot = None;
         self.selecting = false;
         self.crop_epoch = self.crop_epoch.wrapping_add(1);
-        self.state.begin_session()
+        self.state.session = self.state.session.wrapping_add(1);
+        self.state.busy = false;
     }
     fn open(&mut self) -> Task<Message> {
         if let Some(&id) = self.state.window_ids.first() {
@@ -232,7 +238,15 @@ impl App {
                 self.pending_capture = None;
                 self.state.busy = false;
                 match result {
-                    Ok(image) => self.screenshot = image,
+                    Ok(Some(image)) => {
+                        self.screenshot = Some(image);
+                        let decode = self.scan_screenshot(None);
+                        return Task::batch([self.open(), decode]);
+                    }
+                    Ok(None) => {
+                        self.screenshot = None;
+                        self.state.capture_cancelled = true;
+                    }
                     Err(e) => self.state.error = Some(e),
                 }
                 self.open()
@@ -332,7 +346,7 @@ impl App {
             }
             Message::SelectCamera(device) => self.start_camera(device),
             Message::StopCamera => {
-                self.reset_source();
+                self.invalidate_source();
                 self.state.busy = false;
                 Task::none()
             }
@@ -409,20 +423,25 @@ impl App {
             },
         )
     }
-    fn view(&self, _id: window::Id) -> Element<'_, Message> {
-        let status = if self.camera.is_some() && self.state.error.is_none() {
+    fn status(&self) -> &str {
+        if self.camera.is_some() && self.state.error.is_none() {
             "Camera scanning…"
         } else if self.state.busy {
             "Scanning…"
         } else if let Some(error) = self.state.error.as_deref() {
             error
+        } else if self.state.capture_cancelled {
+            "Capture cancelled."
         } else if self.state.scanned && self.state.results.is_empty() {
             "No QR codes found."
         } else if self.state.scanned {
             "Scan complete"
         } else {
             "Ready"
-        };
+        }
+    }
+    fn view(&self, _id: window::Id) -> Element<'_, Message> {
+        let status = self.status();
         let mut results = column![].spacing(12);
         for (index, result) in self.state.results.iter().enumerate() {
             let mut actions = row![button("Copy").on_press(Message::CopyResult(index))].spacing(8);
@@ -791,5 +810,108 @@ mod temporary_capture_tests {
         assert_eq!(app.state.window_ids.len(), 1);
         let _ = app.update(Message::CaptureFinished(old, Err("old failure".into())));
         assert_ne!(app.state.error.as_deref(), Some("old failure"));
+    }
+}
+
+#[cfg(test)]
+mod final_review_tests {
+    use super::capture_tests::app;
+    use super::*;
+    #[tokio::test]
+    async fn captured_image_automatically_schedules_full_decode() {
+        use iced::futures::StreamExt;
+        let mut app = app();
+        let id = app.state.begin_session();
+        let image = Arc::new(crate::capture::Prepared::new(
+            image::DynamicImage::new_rgb8(7, 9),
+        ));
+        let task = app.update(Message::CaptureFinished(id, Ok(Some(image.clone()))));
+        assert!(Arc::ptr_eq(app.screenshot.as_ref().unwrap(), &image));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        let mut scheduled = false;
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message @ Message::DecodeRequested(_, _)) = action {
+                if let Message::DecodeRequested(_, gray) = &message {
+                    assert_eq!(gray.dimensions(), (7, 9));
+                }
+                let _ = app.update(message);
+                scheduled = true;
+            }
+        }
+        assert!(
+            scheduled,
+            "capture must schedule decoding without another click"
+        );
+        let outcome = app.decoder.subscribe().recv().await.unwrap();
+        let _ = app.update(Message::DecodeFinished(outcome));
+        assert!(app.state.scanned);
+        assert!(!app.state.busy);
+    }
+    #[test]
+    fn stop_retains_results_and_rejects_stale_camera_and_decode_work() {
+        let mut app = app();
+        let id = app.state.begin_session();
+        app.camera_mode = true;
+        app.camera_preview = Some(iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]));
+        let _ = app.update(Message::DecodeFinished(Arc::new(
+            crate::jobs::DecodeOutcome {
+                id,
+                result: Ok(vec![crate::results::QrResult::from_payload(
+                    b"keep".to_vec(),
+                )]),
+            },
+        )));
+        let _ = app.update(Message::StopCamera);
+        assert_eq!(
+            app.state.results.len(),
+            1,
+            "Stop must retain scanned results"
+        );
+        assert!(app.state.scanned);
+        assert!(app.camera.is_none());
+        assert!(app.camera_preview.is_none());
+        assert!(!app.camera_mode);
+        let _ = app.update(Message::CameraOutcome(Arc::new(crate::camera::Outcome {
+            id,
+            event: crate::camera::Event::Frame {
+                preview: Some(iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4])),
+                gray: Some(Arc::new(image::GrayImage::new(1, 1))),
+            },
+        })));
+        let _ = app.update(Message::DecodeRequested(
+            id,
+            Arc::new(image::GrayImage::new(1, 1)),
+        ));
+        let _ = app.update(Message::DecodeFinished(Arc::new(
+            crate::jobs::DecodeOutcome {
+                id,
+                result: Ok(vec![crate::results::QrResult::from_payload(
+                    b"stale".to_vec(),
+                )]),
+            },
+        )));
+        assert_eq!(app.state.results.len(), 1);
+        assert_eq!(app.state.results[0].payload, b"keep");
+        assert!(app.camera_preview.is_none());
+        assert!(!app.state.busy);
+        let _ = app.command(Command::ScanCamera);
+        assert!(app.state.results.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cancellation_feedback_tests {
+    use super::*;
+    #[test]
+    fn cancelled_capture_has_distinct_status_cleared_by_next_operation() {
+        let mut app = super::capture_tests::app();
+        let id = app.state.begin_session();
+        let _ = app.update(Message::CaptureFinished(id, Ok(None)));
+        assert_eq!(app.status(), "Capture cancelled.");
+        assert!(!app.state.busy);
+        assert!(!app.state.scanned);
+        assert!(app.state.error.is_none());
+        let _ = app.command(Command::ScanCamera);
+        assert_ne!(app.status(), "Capture cancelled.");
     }
 }

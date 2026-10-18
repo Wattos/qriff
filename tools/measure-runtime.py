@@ -36,6 +36,8 @@ for mode in ["idle", "camera"]:
                 code = proc.wait(timeout=5)
                 log.seek(0)
                 print(json.dumps(dict(backend=backend, mode=mode, startup_socket_ms=round(startup_ms,3), cpu_percent_one_core=round((end_ticks-ticks)/os.sysconf("SC_CLK_TCK")/elapsed*100,3), memory_kib=mem, sample_seconds=round(elapsed,3), camera_fds=camera_fds, exit=code, stderr=log.read())))
+                if code != 0:
+                    raise subprocess.CalledProcessError(code, [binary])
             finally:
                 if proc.poll() is None:
                     proc.terminate(); proc.wait(timeout=5)
