@@ -123,6 +123,21 @@ For **each** GNOME, Hyprland and Sway session, complete this checklist:
 - [ ] Delayed results after window close/source change; no stale window reopening.
 
 Native device access is implemented. Flatpak Camera portal/PipeWire support is
-deferred. Noninteractive capture is a future UX investigation: KDE has a backend
-branch for `interactive=false`, but frontend permission handling may still prompt.
-No universally dialog-free promise or unverified capture-flow change is made.
+deferred. The default Scan screen action now uses noninteractive portal capture, with
+Desktop capture… as an explicit interactive fallback. A first-use permission
+prompt remains desktop-controlled. No universally dialog-free promise is made.
+
+## Quick capture update (2026-10-19)
+
+Wire-format regression tests verify that quick capture sends `interactive=false`
+and never requests the native area selector, including when the portal advertises
+area support. The explicit fallback requests interactive capture and uses native
+area selection only when supported. The app lifecycle test verifies fallback mode
+survives window closure, permission errors restore the window without retry, and
+the next Scan screen returns to quick mode. Both default-mode and fallback tests
+were observed failing before the changes.
+
+The updated Rust suite has 43 unit tests and 8 integration tests. The measurements
+above predate this capture-option change; no new capture latency or first-use
+permission acceptance is inferred from them. Live first-use consent and repeated
+quick capture on the installed KDE portal remain to be checked by the user.

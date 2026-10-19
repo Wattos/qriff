@@ -116,9 +116,19 @@ The default build uses tiny-skia. For an optional GPU comparison build, use
 `cargo build --release --features gpu`; select `ICED_BACKEND=wgpu` or
 `ICED_BACKEND=tiny-skia`. See the measurements before choosing a backend.
 
-A future capture flow should try noninteractive portal capture and show region
-selection only when needed. KDE's current screenshot backend has a
-noninteractive branch for `interactive=false`, but portal frontend permissions
-can still prompt. This does not establish universally dialog-free capture.
-The current app retains the verified interactive portal flow; improving its
-visual integration and main-window polish remains follow-up work.
+Scan screen uses noninteractive portal capture and immediately decodes the full
+screenshot. The portal may ask for screenshot permission on first use; after
+approval, KDE can remember consent without showing its capture/options dialog
+on each scan. Permissions remain controlled by the desktop, so other portal
+backends may behave differently. Select region narrows an already captured image.
+
+Desktop capture… is an explicit fallback that opens the desktop's interactive
+capture UI (including native area selection when advertised). Denial or cancellation
+never silently triggers a second capture request. The app does not alter portal
+permission settings.
+
+For app-specific permission identification, use the installed desktop launcher.
+A development binary launched directly from a terminal can appear as a generic
+application on older portal versions; do not assume its consent is app-specific.
+The first permission dialog and direct desktop-wide region overlays are separate
+from the recurring capture/options dialog removed by quick capture.

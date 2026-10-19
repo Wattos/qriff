@@ -35,21 +35,39 @@ fn load_response(
         .map_err(|_| anyhow::anyhow!("Portal returned a non-local file URI"))?;
     Ok(CaptureOutcome::Captured(loader(&path)?))
 }
-/// Interactive v2 fallback; request an area only when v3 explicitly advertises it.
-pub async fn screenshot() -> anyhow::Result<CaptureOutcome> {
-    use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotOptions, ScreenshotProxy};
-    let proxy = ScreenshotProxy::new().await?;
-    let mut options = ScreenshotOptions::default()
-        .set_interactive(true)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureMode {
+    #[default]
+    Quick,
+    Interactive,
+}
+
+fn screenshot_options(
+    mode: CaptureMode,
+    area_available: bool,
+) -> ashpd::desktop::screenshot::ScreenshotOptions {
+    use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotOptions};
+    let options = ScreenshotOptions::default()
+        .set_interactive(mode == CaptureMode::Interactive)
         .set_modal(false);
-    if proxy.version() >= 3
+    if mode == CaptureMode::Interactive && area_available {
+        options.set_target(AvailableTargets::Area)
+    } else {
+        options
+    }
+}
+
+/// Request a screenshot using the desktop portal.
+pub async fn screenshot(mode: CaptureMode) -> anyhow::Result<CaptureOutcome> {
+    use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotProxy};
+    let proxy = ScreenshotProxy::new().await?;
+    let area_available = mode == CaptureMode::Interactive
+        && proxy.version() >= 3
         && proxy
             .available_targets()
             .await
-            .is_ok_and(|targets| targets.contains(AvailableTargets::Area))
-    {
-        options = options.set_target(AvailableTargets::Area);
-    }
+            .is_ok_and(|targets| targets.contains(AvailableTargets::Area));
+    let options = screenshot_options(mode, area_available);
     let response = match proxy.screenshot(None, options).await {
         Ok(request) => request.response(),
         Err(error) => Err(error),
@@ -111,6 +129,42 @@ mod tests {
                 load_local
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod capture_mode_tests {
+    use super::*;
+    use zbus::zvariant::{self, LE, OwnedValue, serialized::Context};
+    fn wire_options(
+        mode: CaptureMode,
+        area_available: bool,
+    ) -> std::collections::HashMap<String, OwnedValue> {
+        let bytes = zvariant::to_bytes(
+            Context::new_dbus(LE, 0),
+            &screenshot_options(mode, area_available),
+        )
+        .unwrap();
+        bytes.deserialize().unwrap().0
+    }
+    #[test]
+    fn quick_capture_never_requests_a_dialog_or_native_area_selector() {
+        for area_available in [false, true] {
+            let options = wire_options(CaptureMode::Quick, area_available);
+            assert!(!bool::try_from(options["interactive"].try_clone().unwrap()).unwrap());
+            assert!(!options.contains_key("target"));
+        }
+    }
+    #[test]
+    fn explicit_desktop_capture_uses_interactive_selection_only_when_supported() {
+        let older = wire_options(CaptureMode::Interactive, false);
+        assert!(bool::try_from(older["interactive"].try_clone().unwrap()).unwrap());
+        assert!(!older.contains_key("target"));
+        let newer = wire_options(CaptureMode::Interactive, true);
+        assert_eq!(
+            u32::try_from(newer["target"].try_clone().unwrap()).unwrap(),
+            4
         );
     }
 }

@@ -37,6 +37,7 @@ pub enum Message {
     SelectCamera(crate::camera::Device),
     StopCamera,
     ScanFull,
+    DesktopCapture,
     SelectRegion,
     CancelCrop,
     CropSelected(crate::jobs::JobId, crate::capture::crop::PixelRect),
@@ -62,6 +63,7 @@ struct App {
     selecting: bool,
     crop_epoch: u64,
     pending_capture: Option<crate::jobs::JobId>,
+    capture_mode: crate::capture::CaptureMode,
     temporary_closes: std::collections::HashSet<window::Id>,
 }
 pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
@@ -88,6 +90,7 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                 selecting: false,
                 crop_epoch: 0,
                 pending_capture: None,
+                capture_mode: crate::capture::CaptureMode::Quick,
                 temporary_closes: Default::default(),
             };
             let task = if command == Command::Background {
@@ -139,10 +142,10 @@ impl App {
         self.state.windows = self.state.window_ids.len();
         task.map(Message::Opened)
     }
-    fn capture_task(id: crate::jobs::JobId) -> Task<Message> {
+    fn capture_task(id: crate::jobs::JobId, mode: crate::capture::CaptureMode) -> Task<Message> {
         Task::perform(
             async move {
-                match crate::capture::screenshot()
+                match crate::capture::screenshot(mode)
                     .await
                     .map_err(|e| e.to_string())?
                 {
@@ -159,6 +162,19 @@ impl App {
             move |result| Message::CaptureFinished(id, result),
         )
     }
+    fn begin_capture(&mut self, mode: crate::capture::CaptureMode) -> Task<Message> {
+        let id = self.reset_source();
+        self.capture_mode = mode;
+        self.pending_capture = Some(id);
+        let windows = std::mem::take(&mut self.state.window_ids);
+        self.state.windows = 0;
+        self.temporary_closes.extend(windows.iter().copied());
+        if self.temporary_closes.is_empty() {
+            Self::capture_task(id, self.capture_mode)
+        } else {
+            Task::batch(windows.into_iter().map(window::close))
+        }
+    }
     fn command(&mut self, command: Command) -> Task<Message> {
         match command {
             Command::Quit => {
@@ -168,18 +184,7 @@ impl App {
             Command::Show if self.pending_capture.is_some() => Task::none(),
             Command::Show => self.open(),
             Command::Background => Task::none(),
-            Command::ScanScreen => {
-                let id = self.reset_source();
-                self.pending_capture = Some(id);
-                let windows = std::mem::take(&mut self.state.window_ids);
-                self.state.windows = 0;
-                self.temporary_closes.extend(windows.iter().copied());
-                if self.temporary_closes.is_empty() {
-                    Self::capture_task(id)
-                } else {
-                    Task::batch(windows.into_iter().map(window::close))
-                }
-            }
+            Command::ScanScreen => self.begin_capture(crate::capture::CaptureMode::Quick),
             Command::ScanCamera => {
                 let id = self.reset_source();
                 self.camera_mode = true;
@@ -213,7 +218,7 @@ impl App {
                 if self.temporary_closes.remove(&id) {
                     return if self.temporary_closes.is_empty() {
                         self.pending_capture
-                            .map(Self::capture_task)
+                            .map(|id| Self::capture_task(id, self.capture_mode))
                             .unwrap_or_else(Task::none)
                     } else {
                         Task::none()
@@ -251,6 +256,7 @@ impl App {
                 }
                 self.open()
             }
+            Message::DesktopCapture => self.begin_capture(crate::capture::CaptureMode::Interactive),
             Message::ScanFull => self.scan_screenshot(None),
             Message::SelectRegion => {
                 self.crop_epoch = self.crop_epoch.wrapping_add(1);
@@ -502,7 +508,10 @@ impl App {
                 text("Scan QR codes locally from your screen or camera."),
                 row![
                     button("Scan screen").on_press(Message::UserCommand(Command::ScanScreen)),
-                    button("Scan camera").on_press(Message::UserCommand(Command::ScanCamera))
+                    button("Scan camera").on_press(Message::UserCommand(Command::ScanCamera)),
+                    button("Desktop capture…")
+                        .on_press(Message::DesktopCapture)
+                        .style(button::text)
                 ]
                 .spacing(8),
                 text(status),
@@ -671,6 +680,7 @@ mod capture_tests {
             selecting: false,
             crop_epoch: 0,
             pending_capture: None,
+            capture_mode: crate::capture::CaptureMode::Quick,
             temporary_closes: Default::default(),
         }
     }
@@ -913,5 +923,33 @@ mod cancellation_feedback_tests {
         assert!(app.state.error.is_none());
         let _ = app.command(Command::ScanCamera);
         assert_ne!(app.status(), "Capture cancelled.");
+    }
+}
+
+#[cfg(test)]
+mod quick_capture_tests {
+    use super::capture_tests::app;
+    use super::*;
+    #[test]
+    fn explicit_fallback_survives_window_close_then_next_scan_returns_to_quick() {
+        let mut app = app();
+        let window = window::Id::unique();
+        app.state.window_ids.push(window);
+        app.state.windows = 1;
+        let _ = app.update(Message::DesktopCapture);
+        let id = app.pending_capture.unwrap();
+        assert_eq!(app.capture_mode, crate::capture::CaptureMode::Interactive);
+        assert!(app.temporary_closes.contains(&window));
+        assert!(app.update(Message::WindowClosed(window)).units() > 0);
+        assert_eq!(app.capture_mode, crate::capture::CaptureMode::Interactive);
+        let _ = app.update(Message::CaptureFinished(
+            id,
+            Err("Permission denied".into()),
+        ));
+        assert_eq!(app.state.error.as_deref(), Some("Permission denied"));
+        assert!(app.pending_capture.is_none());
+        assert_eq!(app.state.window_ids.len(), 1);
+        let _ = app.command(Command::ScanScreen);
+        assert_eq!(app.capture_mode, crate::capture::CaptureMode::Quick);
     }
 }
