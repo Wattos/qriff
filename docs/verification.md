@@ -132,9 +132,11 @@ prompt remains desktop-controlled. No universally dialog-free promise is made.
 Wire-format regression tests verify that quick capture sends `interactive=false`
 and never requests the native area selector, including when the portal advertises
 area support. The explicit fallback requests interactive capture and uses native
-area selection only when supported. The app lifecycle test verifies fallback mode
-survives window closure, permission errors restore the window without retry, and
-the next Scan screen returns to quick mode. Both default-mode and fallback tests
+area selection only when supported. The app lifecycle test verifies retained
+fallback mode across window closure, restored window state after a permission
+error, and that the next Scan screen returns to quick mode. Source review confirms
+that errors do not trigger an automatic second request; the lifecycle test does
+not execute the returned portal request against a live service. Both default-mode and fallback tests
 were observed failing before the changes.
 
 The updated Rust suite has 43 unit tests and 8 integration tests. The measurements
