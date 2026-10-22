@@ -27,6 +27,8 @@ url = "2.5.8"
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screenshot", "settings"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 v4l = "0.14"
 nokhwa-core = { version = "0.1.9", features = ["mjpeg"] }
 

@@ -2748,6 +2748,8 @@ dependencies = [
  "tokio",
  "url",
  "v4l",
+ "wayland-client",
+ "wayland-protocols",
  "zbus",
 ]
 
