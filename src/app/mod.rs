@@ -280,16 +280,38 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         // Geometry may change after feedback, a reveal or newly decoded cards.
         // A previously confirmed viewport must not authorize an invisible action.
-        if matches!(
-            &message,
-            Message::Resized(_)
-                | Message::Copied(..)
-                | Message::ActionFinished(..)
-                | Message::RevealPassword(_)
-                | Message::DecodeFinished(_)
-                | Message::ToggleMore
-                | Message::ToggleSettings
-        ) {
+        // Preview widgets have fixed dimensions, so replacement camera frames
+        // must preserve readiness. Only inserting/removing a preview changes layout.
+        let camera_geometry_change = match &message {
+            Message::CameraOutcome(outcome) => match &outcome.event {
+                crate::camera::Event::Frame { preview, .. } => {
+                    self.camera_preview.is_none() && preview.is_some()
+                }
+                crate::camera::Event::Error(_) | crate::camera::Event::Stopped => true,
+            },
+            _ => false,
+        };
+        if camera_geometry_change
+            || matches!(
+                &message,
+                Message::Resized(_)
+                    | Message::Copied(..)
+                    | Message::ActionFinished(..)
+                    | Message::RevealPassword(_)
+                    | Message::DecodeFinished(_)
+                    | Message::ToggleMore
+                    | Message::ToggleSettings
+                    | Message::PreferencesLoaded(_)
+                    | Message::PreferencesSaved(..)
+                    | Message::AutoCopyChanged(_)
+                    | Message::SourceUnavailable(_)
+                    | Message::CameraDevices(..)
+                    | Message::StopCamera
+                    | Message::CaptureFinished(..)
+                    | Message::DecodeRequested(..)
+                    | Message::SelectRegion
+            )
+        {
             self.focus_ready = false;
             self.focus_ticket = self.focus_ticket.wrapping_add(1);
         }

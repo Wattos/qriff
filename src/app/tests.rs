@@ -724,3 +724,122 @@ fn keyboard_visibility_completion_is_session_and_traversal_aware() {
     assert!(app.copy_feedback.is_none());
     assert!(app.result_actions.is_empty());
 }
+
+#[test]
+fn delayed_preference_warning_requires_new_visibility_before_keyboard_action() {
+    for delayed_load in [false, true] {
+        let mut app = capture_tests::app();
+        for _ in 0..8 {
+            app.state
+                .results
+                .push(crate::results::QrResult::from_payload(
+                    b"https://example.org/".to_vec(),
+                ));
+        }
+        app.focus = Some(focus::Target::Copy(6));
+        let _ = app.update(Message::FocusNext(false));
+        let confirmed_ticket = app.focus_ticket;
+        let _ = app.update(Message::FocusVisible(
+            app.state.session,
+            confirmed_ticket,
+            true,
+        ));
+        assert!(app.focus_ready);
+        if delayed_load {
+            let _ = app.update(Message::PreferencesLoaded(
+                crate::settings::LoadedPreferences {
+                    preferences: Default::default(),
+                    path: None,
+                    warning: Some("Settings unavailable".into()),
+                },
+            ));
+        } else {
+            app.preference_revision = 5;
+            app.saving = Some(5);
+            let _ = app.update(Message::PreferencesSaved(
+                5,
+                Err("permission denied".into()),
+            ));
+        }
+        assert!(app.settings_warning.is_some());
+        assert!(
+            !app.focus_ready,
+            "new statusbar warning shrinks the confirmed viewport"
+        );
+        let _ = app.update(Message::FocusVisible(
+            app.state.session,
+            confirmed_ticket,
+            true,
+        ));
+        assert!(
+            !app.focus_ready,
+            "previous geometry cannot authorize activation"
+        );
+        let _ = app.update(Message::KeyboardActivate);
+        assert!(
+            app.result_actions.is_empty(),
+            "Enter must only request visibility"
+        );
+        let _ = app.update(Message::FocusVisible(
+            app.state.session,
+            app.focus_ticket,
+            true,
+        ));
+        let _ = app.update(Message::KeyboardActivate); // Drop returned future: no OS action.
+        assert!(app.result_actions.contains_key(&7));
+        assert_eq!(app.result_actions.len(), 1);
+    }
+}
+
+#[test]
+fn camera_readiness_changes_on_preview_insertion_but_not_replacement_frames() {
+    let mut app = capture_tests::app();
+    app.camera_mode = true;
+    app.width = 560.;
+    app.focus_ready = true;
+    let frame = || {
+        Message::CameraOutcome(Arc::new(crate::camera::Outcome {
+            id: crate::jobs::JobId(0),
+            event: crate::camera::Event::Frame {
+                preview: Some(iced::widget::image::Handle::from_rgba(
+                    1,
+                    1,
+                    vec![0, 0, 0, 255],
+                )),
+                gray: None,
+            },
+        }))
+    };
+    let _ = app.update(frame());
+    assert!(
+        !app.focus_ready,
+        "inserting the preview shifts the narrow results"
+    );
+    app.focus_ready = true;
+    let ticket = app.focus_ticket;
+    for _ in 0..20 {
+        let _ = app.update(frame());
+    }
+    assert!(
+        app.focus_ready,
+        "fixed-size preview replacements must not starve keyboard activation"
+    );
+    assert_eq!(app.focus_ticket, ticket);
+    let _ = app.update(Message::CameraOutcome(Arc::new(crate::camera::Outcome {
+        id: crate::jobs::JobId(0),
+        event: crate::camera::Event::Stopped,
+    })));
+    assert!(!app.focus_ready);
+}
+
+#[test]
+fn synchronous_settings_warning_invalidates_confirmed_viewport() {
+    let mut app = capture_tests::app();
+    app.preferences_loaded = true;
+    app.focus_ready = true;
+    let confirmed = app.focus_ticket;
+    let _ = app.update(Message::AutoCopyChanged(true)); // No config path: no disk task.
+    assert!(app.settings_warning.is_some());
+    assert!(!app.focus_ready);
+    assert_ne!(app.focus_ticket, confirmed);
+}
