@@ -27,25 +27,31 @@ impl ksni::Tray for Item {
         "QRiff".into()
     }
     fn icon_name(&self) -> String {
-        // Use the embedded logo even when no icon theme installation exists.
-        String::new()
+        "view-barcode-qr".into()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        let pixels = image::load_from_memory(include_bytes!("../assets/qriff-tray.png"))
-            .expect("embedded QRiff tray icon")
-            .into_rgba8();
-        let (width, height) = pixels.dimensions();
-        // StatusNotifierItem transports pixels in network-byte-order ARGB.
-        let data = pixels
-            .pixels()
-            .flat_map(|pixel| {
-                let [r, g, b, a] = pixel.0;
-                [a, r, g, b]
-            })
-            .collect();
+        // A self-contained high-contrast finder-pattern icon, ARGB byte order.
+        let mut data = vec![255; 32 * 32 * 4];
+        for y in 0..32 {
+            for x in 0..32 {
+                let black = [(3, 3), (19, 3), (3, 19)].iter().any(|&(a, b)| {
+                    let dx = x - a;
+                    let dy = y - b;
+                    (0..10).contains(&dx)
+                        && (0..10).contains(&dy)
+                        && (!(2..8).contains(&dx)
+                            || !(2..8).contains(&dy)
+                            || ((4..6).contains(&dx) && (4..6).contains(&dy)))
+                });
+                if black {
+                    let i = (y * 32 + x) as usize * 4;
+                    data[i + 1..i + 4].fill(0);
+                }
+            }
+        }
         vec![ksni::Icon {
-            width: width as i32,
-            height: height as i32,
+            width: 32,
+            height: 32,
             data,
         }]
     }
