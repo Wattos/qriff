@@ -403,3 +403,48 @@ fn responsive_panel_visibility_uses_rendered_viewport_when_stored_size_differs()
         })
     );
 }
+
+#[test]
+fn editor_copy_and_cut_shortcuts_request_guarded_selection_copy() {
+    use iced::keyboard::{
+        Key, Modifiers,
+        key::{NativeCode, Physical},
+    };
+    for key in ["c", "x"] {
+        let binding = view::editor_binding(text_editor::KeyPress {
+            key: Key::Character(key.into()),
+            modified_key: Key::Character(key.into()),
+            physical_key: Physical::Unidentified(NativeCode::Unidentified),
+            modifiers: Modifiers::CTRL,
+            text: None,
+            status: text_editor::Status::Focused { is_hovered: false },
+        });
+        assert!(matches!(
+            binding,
+            Some(text_editor::Binding::Custom(Event::CopySelection))
+        ));
+    }
+}
+#[test]
+fn partial_copy_uses_only_current_visible_selection_and_hide_discards_it() {
+    use text_editor::{Action, Motion};
+    let mut m = model(&["prefix suffix"], &[0]);
+    m.update(Event::Select(0), false);
+    m.update(Event::Text(Action::Move(Motion::DocumentStart)), false);
+    for _ in 0..6 {
+        m.update(Event::Text(Action::Select(Motion::Right)), false);
+    }
+    assert_eq!(m.update(Event::CopySelection, false), Effect::CopySelection);
+    assert_eq!(m.selected_text().as_deref(), Some("prefix"));
+    m.update(Event::Background, false);
+    assert_eq!(m.selected_text(), None);
+    assert_eq!(m.update(Event::CopySelection, false), Effect::None);
+    let mut m = model(&["WIFI:T:bad;S:test;P:synthetic-secret;;"], &[0]);
+    m.update(Event::Select(0), false);
+    m.update(Event::Reveal, false);
+    m.update(Event::Text(Action::SelectAll), false);
+    assert!(m.selected_text().unwrap().contains("synthetic-secret"));
+    m.update(Event::Reveal, false);
+    assert_eq!(m.selected_text(), None);
+    assert_eq!(m.update(Event::CopySelection, false), Effect::None);
+}

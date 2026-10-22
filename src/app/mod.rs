@@ -2,6 +2,7 @@ mod appearance;
 pub mod clipboard;
 mod focus;
 mod icons;
+mod overlay;
 pub mod state;
 pub(crate) mod style;
 pub(crate) mod view;
@@ -15,6 +16,15 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub enum Message {
+    LayoutChanged(crate::display::LayoutState),
+    WindowResized(window::Id, iced::Size),
+    WindowKey(window::Id, iced::keyboard::Key, bool, iced::event::Status),
+    OverlayEvent(crate::jobs::JobId, window::Id, crate::overlay::Event),
+    SpatialFinished(
+        crate::jobs::JobId,
+        u64,
+        Result<Arc<crate::decode::SpatialScan>, String>,
+    ),
     Appearance(bool, iced::Color),
     ToggleMore,
     ToggleSettings,
@@ -79,6 +89,18 @@ impl std::hash::Hash for PrimarySource {
 }
 struct App {
     pub state: state::State,
+    layout: crate::display::LayoutState,
+    overlay: Option<overlay::Surface>,
+    retired_overlays: std::collections::HashSet<window::Id>,
+    overlay_closes: Vec<window::Id>,
+    deferred_action: Option<overlay::DeferredAction>,
+    capture_layout: Option<crate::display::Layout>,
+    pending_spatial: Option<(crate::jobs::JobId, u64)>,
+    spatial_gate: Arc<tokio::sync::Semaphore>,
+    spatial_abort: Option<iced::task::Handle>,
+    action_feedback: Option<crate::actions::ActionKey>,
+    overlay_fallback: Option<&'static str>,
+    screen_results: bool,
     windowless: bool,
     clipboard_failed: bool,
     result_texts: std::collections::HashMap<usize, iced::widget::text_editor::Content>,
@@ -130,6 +152,18 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                     background: command == Command::Background,
                     ..Default::default()
                 },
+                layout: crate::display::LayoutState::Unavailable,
+                overlay: None,
+                retired_overlays: Default::default(),
+                overlay_closes: Vec::new(),
+                deferred_action: None,
+                capture_layout: None,
+                pending_spatial: None,
+                spatial_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+                spatial_abort: None,
+                action_feedback: None,
+                overlay_fallback: None,
+                screen_results: false,
                 windowless: matches!(command, Command::ScanScreen | Command::ScanRegion),
                 desktop: tokio::sync::watch::channel(Default::default()).0,
                 clipboard_failed: false,
@@ -201,6 +235,10 @@ impl App {
     /// All source switches (including camera) must invalidate decode/capture work here.
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.invalidate_source();
+        self.deferred_action = None;
+        self.action_feedback = None;
+        self.overlay_fallback = None;
+        self.screen_results = false;
         self.focus_ready = false;
         self.focus = None;
         self.revealed.clear();
@@ -218,6 +256,10 @@ impl App {
     }
     /// Stop capture and invalidate queued messages while retaining visible results.
     fn invalidate_source(&mut self) {
+        self.retire_overlay();
+        self.pending_spatial = None;
+        self.spatial_abort = None;
+        self.capture_layout = None;
         self.retained_result_session = Some(self.result_session());
         self.decoder.cancel();
         if let Some(camera) = self.camera.take() {
@@ -234,6 +276,7 @@ impl App {
         self.state.busy = false;
     }
     fn open(&mut self) -> Task<Message> {
+        self.refresh_result_texts();
         if let Some(&id) = self.state.window_ids.first() {
             return window::set_mode(id, window::Mode::Windowed).chain(window::gain_focus(id));
         }
@@ -251,7 +294,7 @@ impl App {
             async move {
                 match crate::capture::screenshot(mode)
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|_| "Could not capture the desktop.".to_owned())?
                 {
                     crate::capture::CaptureOutcome::Cancelled => Ok(None),
                     crate::capture::CaptureOutcome::Captured(image) => {
@@ -259,7 +302,7 @@ impl App {
                             Some(Arc::new(crate::capture::Prepared::new(image)))
                         })
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|_| "Could not prepare the desktop capture.".to_owned())
                     }
                 }
             },
@@ -269,10 +312,17 @@ impl App {
     fn begin_capture(&mut self, mode: crate::capture::CaptureMode) -> Task<Message> {
         let id = self.reset_source();
         self.capture_mode = mode;
+        self.screen_results = true;
+        self.capture_layout = match &self.layout {
+            crate::display::LayoutState::Ready(layout) => Some(layout.clone()),
+            crate::display::LayoutState::Unavailable => None,
+        };
         self.pending_capture = Some(id);
         let windows = std::mem::take(&mut self.state.window_ids);
         self.state.windows = 0;
         self.temporary_closes.extend(windows.iter().copied());
+        self.temporary_closes
+            .extend(self.retired_overlays.iter().copied());
         if self.temporary_closes.is_empty() {
             Self::capture_task(id, self.capture_mode)
         } else {
@@ -283,12 +333,16 @@ impl App {
         match command {
             Command::Quit => {
                 self.reset_source();
-                iced::exit()
+                self.overlay_close_tasks().chain(iced::exit())
             }
-            Command::Show if self.pending_capture.is_some() => Task::none(),
-            Command::Show => self.open(),
+            Command::Show if self.pending_capture.is_some() || self.pending_spatial.is_some() => {
+                Task::none()
+            }
+            Command::Show => Task::batch([self.dismiss_overlay(), self.open()]),
             Command::Background => Task::none(),
-            Command::ScanScreen | Command::ScanRegion if self.pending_capture.is_some() => {
+            Command::ScanScreen | Command::ScanRegion
+                if self.pending_capture.is_some() || self.pending_spatial.is_some() =>
+            {
                 Task::none()
             }
             Command::ScanScreen => self.begin_capture(crate::capture::CaptureMode::Quick),
@@ -330,24 +384,27 @@ impl App {
         let old_identity = (self.result_session(), self.state.results.len());
         let task = self.update_inner(message);
         if reveal || old_identity != (self.result_session(), self.state.results.len()) {
-            self.result_texts
-                .retain(|index, _| *index < self.state.results.len());
-            for (index, result) in self.state.results.iter().enumerate() {
-                let text = view::payload(result, self.revealed.contains(&index));
-                if self
-                    .result_texts
-                    .get(&index)
-                    .is_none_or(|content| content.text() != text)
-                {
-                    self.result_texts
-                        .insert(index, iced::widget::text_editor::Content::with_text(&text));
-                }
-            }
+            self.refresh_result_texts();
         }
         if publish {
             self.publish_desktop();
         }
-        task
+        Task::batch([task, self.overlay_close_tasks()])
+    }
+    fn refresh_result_texts(&mut self) {
+        self.result_texts
+            .retain(|index, _| *index < self.state.results.len());
+        for (index, result) in self.state.results.iter().enumerate() {
+            let text = view::payload(result, self.revealed.contains(&index));
+            if self
+                .result_texts
+                .get(&index)
+                .is_none_or(|content| content.text() != text)
+            {
+                self.result_texts
+                    .insert(index, iced::widget::text_editor::Content::with_text(&text));
+            }
+        }
     }
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         // Geometry may change after feedback, a reveal or newly decoded cards.
@@ -389,6 +446,23 @@ impl App {
             self.focus_ticket = self.focus_ticket.wrapping_add(1);
         }
         match message {
+            Message::LayoutChanged(layout) => self.layout_changed(layout),
+            Message::WindowResized(id, size) => self.window_resized(id, size),
+            Message::WindowKey(id, key, shift, status) => {
+                if self.state.window_ids.contains(&id) {
+                    focus::key_message(&key, shift, status)
+                        .map(|message| self.update_inner(message))
+                        .unwrap_or_else(Task::none)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::OverlayEvent(session, id, event) => {
+                self.handle_overlay_event(session, id, event)
+            }
+            Message::SpatialFinished(id, revision, result) => {
+                self.spatial_finished(id, revision, result)
+            }
             Message::Appearance(dark, accent) => {
                 self.dark = dark;
                 self.accent = accent;
@@ -443,7 +517,10 @@ impl App {
                 Task::none()
             }
             Message::UserCommand(c) => {
-                if matches!(c, Command::ScanScreen | Command::ScanRegion) {
+                if matches!(c, Command::ScanScreen | Command::ScanRegion)
+                    && self.pending_capture.is_none()
+                    && self.pending_spatial.is_none()
+                {
                     self.windowless = false;
                 }
                 self.command(c)
@@ -451,14 +528,18 @@ impl App {
             Message::InstanceCommand(c) => {
                 if matches!(c, Command::ScanScreen | Command::ScanRegion)
                     && self.pending_capture.is_none()
+                    && self.pending_spatial.is_none()
                 {
                     self.windowless = true;
                 }
                 self.command(c)
             }
             Message::TrayHostChanged(available) => {
-                if self.state.host_changed(available) && self.pending_capture.is_none() {
-                    self.open()
+                if self.state.host_changed(available)
+                    && self.pending_capture.is_none()
+                    && self.pending_spatial.is_none()
+                {
+                    Task::batch([self.dismiss_overlay(), self.open()])
                 } else {
                     Task::none()
                 }
@@ -467,6 +548,7 @@ impl App {
                 // Iced broadcasts Closed after removing the runtime window. Winit's
                 // Wayland loop processes its destruction before the AboutToWait
                 // phase in which Iced broadcasts these close events.
+                let overlay_closed = self.overlay_closed(id);
                 if self.temporary_closes.remove(&id) {
                     return if self.temporary_closes.is_empty() {
                         self.pending_capture
@@ -475,6 +557,9 @@ impl App {
                     } else {
                         Task::none()
                     };
+                }
+                if let Some(task) = overlay_closed {
+                    return task;
                 }
                 if !self.state.window_ids.contains(&id) {
                     return Task::none();
@@ -489,13 +574,18 @@ impl App {
                 }
             }
             Message::CaptureFinished(id, result) => {
-                if id.0 != self.state.session {
+                if id.0 != self.state.session
+                    || (self.windowless && self.pending_capture != Some(id))
+                {
                     return Task::none();
                 }
                 self.pending_capture = None;
                 self.state.busy = false;
                 match result {
                     Ok(Some(image)) => {
+                        if self.windowless {
+                            return self.spatial_task(id, image);
+                        }
                         self.screenshot = Some(image);
                         let decode = self.scan_screenshot(None);
                         if self.windowless && self.state.host_available {
@@ -508,7 +598,7 @@ impl App {
                         self.screenshot = None;
                         self.state.capture_cancelled = true;
                     }
-                    Err(e) => self.state.error = Some(e),
+                    Err(_) => self.state.error = Some("Could not capture the desktop.".into()),
                 }
                 if self.windowless && self.state.host_available {
                     Task::none()
@@ -601,6 +691,20 @@ impl App {
             }
             Message::ClipboardFinished(session, index, result) => {
                 if session == self.result_session() && index < self.state.results.len() {
+                    if let Some(surface) = self
+                        .overlay
+                        .as_mut()
+                        .filter(|surface| surface.model.session == session)
+                    {
+                        surface.model.set_copy_feedback(
+                            index,
+                            match result {
+                                Ok(()) => crate::overlay::CopyFeedback::Copied,
+                                Err(error) => crate::overlay::CopyFeedback::Failed(error),
+                            },
+                        );
+                    }
+                    self.action_feedback = None;
                     self.clipboard_failed = result.is_err();
                     if result.is_ok() {
                         self.copy_feedback = Some((session, index));
@@ -611,22 +715,35 @@ impl App {
             Message::Copied(session, index) => {
                 if session == self.result_session() && index < self.state.results.len() {
                     self.copy_feedback = Some((session, index));
+                    self.action_feedback = None;
                     self.clipboard_failed = false;
+                    if let Some(surface) = self
+                        .overlay
+                        .as_mut()
+                        .filter(|surface| surface.model.session == session)
+                    {
+                        surface
+                            .model
+                            .set_copy_feedback(index, crate::overlay::CopyFeedback::Copied);
+                    }
                 }
                 Task::none()
             }
             Message::DecodeFinished(outcome) => {
-                if outcome.id.0 != self.state.session {
+                if outcome.id.0 != self.state.session || self.pending_spatial.is_some() {
                     return Task::none();
                 }
                 let previous = self.state.results.len();
                 self.state.accept_decode(&outcome);
-                if let Some(text) = self.auto_copy.on_results(
-                    self.preferences.auto_copy_single,
-                    outcome.id,
-                    &self.state.results,
-                    self.state.results.len() - previous,
-                ) {
+                if !self.windowless
+                    && !self.screen_results
+                    && let Some(text) = self.auto_copy.on_results(
+                        self.preferences.auto_copy_single,
+                        outcome.id,
+                        &self.state.results,
+                        self.state.results.len() - previous,
+                    )
+                {
                     self.copy_task(text, outcome.id, 0)
                 } else {
                     Task::none()
@@ -641,6 +758,9 @@ impl App {
                 })
                 .unwrap_or_else(Task::none),
             Message::ActivateResult(index) => {
+                if self.deferred_action.is_some() {
+                    return Task::none();
+                }
                 let key = crate::actions::ActionKey {
                     session: self.result_session(),
                     result_index: index,
@@ -664,6 +784,8 @@ impl App {
                     .checked_add(1)
                     .expect("action request token exhausted");
                 let token = self.action_token;
+                self.action_feedback = Some(key);
+                self.clipboard_failed = false;
                 self.result_actions.insert(
                     index,
                     crate::actions::ActionState {
@@ -672,9 +794,22 @@ impl App {
                         status: crate::actions::ActionStatus::Pending,
                     },
                 );
-                Task::perform(crate::actions::execute(action), move |result| {
-                    Message::ActionFinished(key, token, result)
-                })
+                if let Some(window) = self
+                    .overlay
+                    .as_ref()
+                    .map(|surface| surface.id)
+                    .or_else(|| self.retired_overlays.iter().copied().next())
+                {
+                    self.deferred_action = Some(overlay::DeferredAction {
+                        window,
+                        key,
+                        token,
+                        action,
+                    });
+                    self.dismiss_overlay()
+                } else {
+                    Self::action_task(key, token, action)
+                }
             }
             Message::ActionFinished(key, token, outcome) => {
                 if key.session == self.result_session()
@@ -687,6 +822,8 @@ impl App {
                                     && matches!(state.status, crate::actions::ActionStatus::Pending)
                             })
                 {
+                    self.action_feedback = Some(key);
+                    self.clipboard_failed = false;
                     state.status = match outcome {
                         Ok(()) => crate::actions::ActionStatus::Succeeded,
                         Err(error) => crate::actions::ActionStatus::Failed(error),
@@ -748,6 +885,7 @@ impl App {
                 }
                 Task::none()
             }
+            Message::Opened(id) if self.temporary_closes.contains(&id) => window::close(id),
             Message::Opened(_) => Task::none(),
         }
     }
@@ -812,7 +950,10 @@ impl App {
             },
             move |result| match result {
                 Ok(image) => Message::DecodeRequested(id, image),
-                Err(e) => Message::CaptureFinished(id, Err(e.to_string())),
+                Err(_) => Message::CaptureFinished(
+                    id,
+                    Err("Could not prepare the desktop capture.".into()),
+                ),
             },
         )
     }
@@ -842,8 +983,24 @@ impl App {
             .map(move |visible| Message::FocusVisible(session, ticket, visible))
     }
     fn copy_task(&self, text: String, session: crate::jobs::JobId, index: usize) -> Task<Message> {
+        self.copy_task_with(text, session, index, clipboard::write_windowless)
+    }
+    fn copy_task_with<F>(
+        &self,
+        text: String,
+        session: crate::jobs::JobId,
+        index: usize,
+        write_windowless: impl FnOnce(String) -> F,
+    ) -> Task<Message>
+    where
+        F: std::future::Future<Output = Result<(), clipboard::ClipboardUnavailable>>
+            + Send
+            + 'static,
+    {
+        // A temporary overlay must not own clipboard data: Iced disconnects its
+        // clipboard when the last runtime window closes. wl-copy outlives it.
         if self.windowless && self.state.window_ids.is_empty() {
-            Task::perform(clipboard::write_windowless(text), move |result| {
+            Task::perform(write_windowless(text), move |result| {
                 Message::ClipboardFinished(session, index, result)
             })
         } else {
@@ -904,27 +1061,31 @@ impl App {
                         .into(),
                 },
             };
-            if results.len() == 1 {
-                if let Some(action) = self
-                    .result_actions
-                    .get(&0)
-                    .filter(|action| action.key.session.0 == session)
-                {
-                    match &action.status {
-                        crate::actions::ActionStatus::Pending => {
-                            notice.title = "QR action in progress…".into()
-                        }
-                        crate::actions::ActionStatus::Succeeded => {
-                            notice.title = "QR action completed".into()
-                        }
-                        crate::actions::ActionStatus::Failed(error) => {
-                            notice.title = "QR action failed".into();
-                            notice.body = error.to_string();
-                        }
+            if let Some(reason) = self.overlay_fallback {
+                notice.body = reason.into();
+            }
+            if let Some(action) = self
+                .action_feedback
+                .filter(|key| key.session.0 == session)
+                .and_then(|key| self.result_actions.get(&key.result_index))
+            {
+                match &action.status {
+                    crate::actions::ActionStatus::Pending => {
+                        notice.title = "QR action in progress…".into()
                     }
-                } else if self.copy_feedback == Some((self.result_session(), 0)) {
-                    notice.title = "QR code copied".into();
+                    crate::actions::ActionStatus::Succeeded => {
+                        notice.title = "QR action completed".into()
+                    }
+                    crate::actions::ActionStatus::Failed(error) => {
+                        notice.title = "QR action failed".into();
+                        notice.body = error.to_string();
+                    }
                 }
+            } else if self
+                .copy_feedback
+                .is_some_and(|(copied, _)| copied == self.result_session())
+            {
+                notice.title = "QR code copied".into();
             }
             if self.clipboard_failed {
                 notice.title = "Could not copy QR code".into();
@@ -949,7 +1110,17 @@ impl App {
         });
     }
     fn view(&self, id: window::Id) -> Element<'_, Message> {
-        view::view(self, id)
+        if let Some(surface) = self.overlay.as_ref().filter(|surface| surface.id == id) {
+            let session = surface.model.session;
+            surface
+                .model
+                .view()
+                .map(move |event| Message::OverlayEvent(session, id, event))
+        } else if self.state.window_ids.contains(&id) {
+            view::view(self, id)
+        } else {
+            iced::widget::space().into()
+        }
     }
     fn subscription(&self) -> Subscription<Message> {
         let primary = self.primary.clone();
@@ -960,13 +1131,14 @@ impl App {
         };
         Subscription::batch([
             Subscription::run(appearance::events),
+            Subscription::run(crate::display::events).map(Message::LayoutChanged),
             camera_subscription,
-            window::resize_events().map(|(_, size)| Message::Resized(size.width)),
+            window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
             window::close_events().map(Message::WindowClosed),
-            iced::event::listen_with(|event, status, _| match event {
+            iced::event::listen_with(|event, status, id| match event {
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key, modifiers, ..
-                }) => focus::key_message(&key, modifiers.shift(), status),
+                }) => Some(Message::WindowKey(id, key, modifiers.shift(), status)),
                 _ => None,
             }),
             Subscription::run_with(DecoderSource(self.decoder.clone()), decode_events),
@@ -1103,3 +1275,6 @@ fn decode_events(source: &DecoderSource) -> impl iced::futures::Stream<Item = Me
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod overlay_tests;

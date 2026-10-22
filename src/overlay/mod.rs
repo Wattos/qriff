@@ -25,6 +25,7 @@ pub enum Event {
     Next(bool),
     ActivateFocused,
     Copy,
+    CopySelection,
     Activate,
     Reveal,
     Text(text_editor::Action),
@@ -33,6 +34,7 @@ pub enum Event {
 pub enum Effect {
     None,
     Copy(usize),
+    CopySelection,
     Activate(usize),
     Dismiss,
 }
@@ -123,6 +125,14 @@ impl Model {
     }
     pub fn resize(&mut self, viewport: Size) {
         self.viewport = viewport;
+    }
+    /// Only the currently visible editor can provide a partial copy. Hidden or
+    /// replaced Wi-Fi editors have no retained selection buffer.
+    pub fn selected_text(&self) -> Option<String> {
+        self.text
+            .as_ref()?
+            .selection()
+            .filter(|text| !text.is_empty())
     }
     pub fn selected_result(&self) -> Option<usize> {
         self.selected
@@ -310,6 +320,7 @@ impl Model {
                 return self.update(e, auto_copy);
             }
             Event::Copy => return self.selected_result().map_or(Effect::None, Effect::Copy),
+            Event::CopySelection if self.selected_text().is_some() => return Effect::CopySelection,
             Event::Activate if self.can_activate() => {
                 return Effect::Activate(self.selected_result().unwrap());
             }

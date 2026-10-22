@@ -1,10 +1,22 @@
 use super::*;
 #[cfg(test)]
-mod capture_tests {
+pub(super) mod capture_tests {
     use super::*;
-    pub(super) fn app() -> App {
+    pub(crate) fn app() -> App {
         App {
             state: Default::default(),
+            layout: crate::display::LayoutState::Unavailable,
+            overlay: None,
+            retired_overlays: Default::default(),
+            overlay_closes: Vec::new(),
+            deferred_action: None,
+            capture_layout: None,
+            pending_spatial: None,
+            spatial_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            spatial_abort: None,
+            action_feedback: None,
+            overlay_fallback: None,
+            screen_results: false,
             windowless: false,
             clipboard_failed: false,
             result_texts: Default::default(),
@@ -162,7 +174,10 @@ mod temporary_capture_tests {
         assert!(app.update(Message::WindowClosed(second)).units() > 0);
         assert_eq!(app.state.session, id.0);
         let _ = app.update(Message::CaptureFinished(id, Err("denied".into())));
-        assert_eq!(app.state.error.as_deref(), Some("denied"));
+        assert_eq!(
+            app.state.error.as_deref(),
+            Some("Could not capture the desktop.")
+        );
         assert!(!app.state.busy);
         assert_eq!(app.state.window_ids.len(), 1);
     }
@@ -307,7 +322,10 @@ mod quick_capture_tests {
             id,
             Err("Permission denied".into()),
         ));
-        assert_eq!(app.state.error.as_deref(), Some("Permission denied"));
+        assert_eq!(
+            app.state.error.as_deref(),
+            Some("Could not capture the desktop.")
+        );
         assert!(app.pending_capture.is_none());
         assert_eq!(app.state.window_ids.len(), 1);
         let _ = app.command(Command::ScanScreen);
@@ -1015,14 +1033,16 @@ fn tray_results_notify_and_reject_old_buttons_without_os_actions() {
     ));
     drop(app.update(Message::CaptureFinished(capture, Ok(Some(image)))));
     let id = crate::jobs::JobId(app.state.session);
-    let _ = app.update(Message::DecodeFinished(Arc::new(
-        crate::jobs::DecodeOutcome {
-            id,
-            result: Ok(vec![crate::results::QrResult::from_payload(
+    let _ = app.update(Message::SpatialFinished(
+        id,
+        0,
+        Ok(Arc::new(crate::decode::SpatialScan {
+            results: vec![crate::results::QrResult::from_payload(
                 b"https://example.org".to_vec(),
-            )]),
-        },
-    )));
+            )],
+            detections: vec![],
+        })),
+    ));
     let snapshot = app.desktop.borrow().clone();
     assert_eq!(snapshot.notification.unwrap().title, "QR code found");
     assert_eq!(snapshot.results[0].action, Some("Open URL"));

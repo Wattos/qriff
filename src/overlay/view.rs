@@ -226,18 +226,7 @@ fn panel(m: &Model, index: usize, bounds: Rectangle) -> Element<'_, Event> {
             container(
                 text_editor(content)
                     .id(m.editor_id())
-                    .key_binding(|press| match press.key.as_ref() {
-                        keyboard::Key::Named(keyboard::key::Named::Tab) => Some(
-                            text_editor::Binding::Custom(Event::Next(press.modifiers.shift())),
-                        ),
-                        keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                            Some(text_editor::Binding::Custom(Event::Escape))
-                        }
-                        keyboard::Key::Named(keyboard::key::Named::Enter) => {
-                            Some(text_editor::Binding::Custom(Event::ActivateFocused))
-                        }
-                        _ => text_editor::Binding::from_key_press(press),
-                    })
+                    .key_binding(editor_binding)
                     .on_action(Event::Text)
                     .height(130)
                     .padding(8)
@@ -366,4 +355,24 @@ fn surface(m: &Model, viewport: Size) -> Element<'_, Event> {
         .position(Point::new((viewport.width - 132.).max(0.), 12.)),
     );
     layers.into()
+}
+
+pub(super) fn editor_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Event>> {
+    match press.key.as_ref() {
+        keyboard::Key::Named(keyboard::key::Named::Tab) => Some(text_editor::Binding::Custom(
+            Event::Next(press.modifiers.shift()),
+        )),
+        keyboard::Key::Named(keyboard::key::Named::Escape) => {
+            Some(text_editor::Binding::Custom(Event::Escape))
+        }
+        keyboard::Key::Named(keyboard::key::Named::Enter) => {
+            Some(text_editor::Binding::Custom(Event::ActivateFocused))
+        }
+        _ => match text_editor::Binding::from_key_press(press) {
+            Some(text_editor::Binding::Copy | text_editor::Binding::Cut) => {
+                Some(text_editor::Binding::Custom(Event::CopySelection))
+            }
+            binding => binding,
+        },
+    }
 }
