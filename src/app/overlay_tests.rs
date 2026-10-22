@@ -30,7 +30,9 @@ fn capture_failures_never_retain_provider_details() {
     let id = crate::jobs::JobId(app.state.session);
     drop(app.update(Message::CaptureFinished(
         id,
-        Err("private provider details".into()),
+        Err(crate::capture::CaptureError::from(anyhow::anyhow!(
+            "private provider details"
+        ))),
     )));
     assert!(!app.state.error.as_ref().unwrap().contains("private"));
 }
@@ -876,4 +878,156 @@ fn explicit_desktop_capture_after_tray_scan_and_open_window_restores_normal_crop
         app.selecting,
         "the retained screenshot supports the ordinary crop workflow"
     );
+}
+
+#[test]
+fn pending_native_region_suppresses_camera_and_second_region_with_feedback() {
+    let mut app = app();
+    app.state.host_available = true;
+    drop(app.update(Message::InstanceCommand(Command::ScanRegion)));
+    let session = app.state.session;
+    assert_eq!(
+        app.update(Message::InstanceCommand(Command::ScanCamera))
+            .units(),
+        0
+    );
+    assert_eq!(
+        app.update(Message::InstanceCommand(Command::ScanRegion))
+            .units(),
+        0
+    );
+    assert_eq!(app.state.session, session);
+    assert!(app.state.window_ids.is_empty());
+    assert!(!app.camera_mode);
+    let notice = app.desktop.borrow().notification.clone().unwrap();
+    assert!(notice.body.contains("Finish or cancel"));
+}
+
+#[test]
+fn source_reset_does_not_release_native_capture_until_its_completion() {
+    let mut app = app();
+    app.state.host_available = true;
+    drop(app.update(Message::InstanceCommand(Command::ScanRegion)));
+    let old = crate::jobs::JobId(app.state.session);
+    app.reset_source();
+    assert_eq!(
+        app.update(Message::InstanceCommand(Command::ScanRegion))
+            .units(),
+        0
+    );
+    drop(app.update(Message::CaptureFinished(old, Ok(None))));
+    assert!(
+        !app.state.capture_cancelled,
+        "obsolete completion must not change current results"
+    );
+    assert!(
+        app.update(Message::InstanceCommand(Command::ScanRegion))
+            .units()
+            > 0
+    );
+}
+
+#[tokio::test]
+async fn fake_pending_provider_stays_single_across_region_camera_region() {
+    use iced::futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut app = app();
+    app.windowless = true;
+    app.state.host_available = true;
+    let active = Arc::new(AtomicUsize::new(0));
+    let provider_active = active.clone();
+    let (finish, pending) = tokio::sync::oneshot::channel::<()>();
+    let (started, start) = tokio::sync::oneshot::channel();
+    let task = app.command_with_capture(Command::ScanRegion, move |id, mode| {
+        assert_eq!(mode, crate::capture::CaptureMode::Region);
+        Task::perform(
+            async move {
+                assert_eq!(provider_active.fetch_add(1, Ordering::SeqCst), 0);
+                started.send(()).unwrap();
+                pending.await.unwrap();
+                provider_active.fetch_sub(1, Ordering::SeqCst);
+            },
+            move |_| Message::CaptureFinished(id, Ok(None)),
+        )
+    });
+    let mut stream = iced_runtime::task::into_stream(task).unwrap();
+    let completion = tokio::spawn(async move { stream.next().await.unwrap() });
+    tokio::time::timeout(std::time::Duration::from_secs(2), start)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.load(Ordering::SeqCst), 1);
+    let old = crate::jobs::JobId(app.state.session);
+    for command in [Command::ScanCamera, Command::ScanRegion] {
+        let task = app.command_with_capture(command, |_, _| panic!("competing capture"));
+        assert_eq!(
+            task.units(),
+            0,
+            "must not enumerate a camera or open a native window"
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+    }
+    app.publish_desktop();
+    assert!(
+        app.desktop
+            .borrow()
+            .notification
+            .as_ref()
+            .unwrap()
+            .body
+            .contains("Finish or cancel")
+    );
+    finish.send(()).unwrap();
+    let iced_runtime::Action::Output(message) = completion.await.unwrap() else {
+        panic!("provider should only emit completion");
+    };
+    drop(app.update(message));
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert!(app.desktop.borrow().notification.is_none());
+    let replacement = app.command_with_capture(Command::ScanRegion, |_, _| Task::none());
+    drop(replacement);
+    assert_ne!(crate::jobs::JobId(app.state.session), old);
+    // A duplicate old callback cannot release a newer native request.
+    drop(app.update(Message::CaptureFinished(old, Ok(None))));
+    assert_eq!(
+        app.command_with_capture(Command::ScanRegion, |_, _| panic!("competing capture"))
+            .units(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn expected_region_failures_retain_actionable_guidance_in_state_and_notifications() {
+    use crate::capture::CaptureError;
+    use iced::futures::StreamExt;
+    for (error, message) in [
+        (
+            CaptureError::RegionUnavailable,
+            "Direct region selection is unavailable on this desktop. Use Scan screen or Desktop capture instead.",
+        ),
+        (
+            CaptureError::SpectacleUnavailable,
+            "Spectacle is required for native region selection on KDE. Install Spectacle, or use Scan screen or Desktop capture instead.",
+        ),
+        (
+            CaptureError::from(anyhow::anyhow!("private provider details")),
+            "Could not capture the desktop.",
+        ),
+    ] {
+        let mut app = app();
+        app.state.host_available = true;
+        drop(app.update(Message::InstanceCommand(Command::ScanRegion)));
+        let id = crate::jobs::JobId(app.state.session);
+        let task = App::capture_task_with(id, async move { Err(error) });
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        let iced_runtime::Action::Output(completion) = stream.next().await.unwrap() else {
+            panic!("capture completion");
+        };
+        drop(app.update(completion));
+        assert_eq!(app.state.error.as_deref(), Some(message));
+        assert_eq!(
+            app.desktop.borrow().notification.as_ref().unwrap().body,
+            message
+        );
+    }
 }

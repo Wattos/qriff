@@ -448,3 +448,45 @@ fn partial_copy_uses_only_current_visible_selection_and_hide_discards_it() {
     assert_eq!(m.selected_text(), None);
     assert_eq!(m.update(Event::CopySelection, false), Effect::None);
 }
+
+#[test]
+fn close_control_uncovers_top_right_detection_before_focus_and_auto_copy() {
+    let mut m = model(&["plain"], &[0]);
+    let viewport = Size::new(400., 200.);
+    m.scan.detections[0].corners = [[280., 18.], [295., 18.], [295., 33.], [280., 33.]];
+    // The 15px QR outline and its 28x26 badge used to be hidden by Close.
+    let visible_mark = iced::Rectangle {
+        x: 276.,
+        y: 14.,
+        width: 32.,
+        height: 30.,
+    };
+    assert!(!m.close_bounds(viewport).unwrap().intersects(&visible_mark));
+    assert_eq!(m.selected_result(), None);
+    assert_eq!(m.update(Event::Next(false), true), Effect::None);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
+    assert!(
+        !m.close_bounds(viewport)
+            .is_some_and(|bounds| bounds.intersects(&visible_mark))
+    );
+    assert!(m.auto_copied.is_empty());
+    assert_eq!(m.update(Event::ActivateFocused, true), Effect::Copy(0));
+    assert_eq!(m.selected_result(), Some(0));
+}
+
+#[test]
+fn crowded_close_position_is_hidden_for_detection_focus_and_restored_for_keyboard_close() {
+    let mut m = model(&["plain"], &[0]);
+    let viewport = Size::new(400., 200.);
+    m.scan.detections[0].corners = [[0., 0.], [400., 0.], [400., 200.], [0., 200.]];
+    m.update(Event::Next(false), true);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
+    assert!(
+        m.close_bounds(viewport).is_none(),
+        "no opaque control may hide detection focus"
+    );
+    m.update(Event::Next(true), true);
+    assert_eq!(m.focus(), Some(Focus::Close));
+    assert!(m.close_bounds(viewport).is_some());
+    assert_eq!(m.update(Event::ActivateFocused, true), Effect::Dismiss);
+}

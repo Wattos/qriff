@@ -62,7 +62,7 @@ pub enum Message {
     ),
     CaptureFinished(
         crate::jobs::JobId,
-        Result<Option<Arc<crate::capture::Prepared>>, String>,
+        Result<Option<Arc<crate::capture::Prepared>>, crate::capture::CaptureError>,
     ),
     CameraOutcome(Arc<crate::camera::Outcome>),
     CameraDevices(
@@ -137,6 +137,10 @@ struct App {
     selecting: bool,
     crop_epoch: u64,
     pending_capture: Option<crate::jobs::JobId>,
+    // Native requests outlive result sessions; only their completion releases this guard.
+    active_capture: Option<crate::jobs::JobId>,
+    capture_busy_notice: bool,
+    capture_error: Option<crate::capture::CaptureError>,
     capture_mode: crate::capture::CaptureMode,
     temporary_closes: std::collections::HashSet<window::Id>,
 }
@@ -200,6 +204,9 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                 selecting: false,
                 crop_epoch: 0,
                 pending_capture: None,
+                active_capture: None,
+                capture_busy_notice: false,
+                capture_error: None,
                 capture_mode: crate::capture::CaptureMode::Quick,
                 temporary_closes: Default::default(),
             };
@@ -232,9 +239,10 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
     .run()
 }
 impl App {
-    /// All source switches (including camera) must invalidate decode/capture work here.
+    /// All source switches invalidate result work here; native request lifetime is separate.
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.invalidate_source();
+        self.capture_error = None;
         self.deferred_action = None;
         self.action_feedback = None;
         self.overlay_fallback = None;
@@ -290,26 +298,50 @@ impl App {
         task.map(Message::Opened)
     }
     fn capture_task(id: crate::jobs::JobId, mode: crate::capture::CaptureMode) -> Task<Message> {
+        Self::capture_task_with(id, crate::capture::screenshot(mode))
+    }
+    fn capture_task_with(
+        id: crate::jobs::JobId,
+        capture: impl Future<
+            Output = Result<crate::capture::CaptureOutcome, crate::capture::CaptureError>,
+        > + Send
+        + 'static,
+    ) -> Task<Message> {
         Task::perform(
             async move {
-                match crate::capture::screenshot(mode)
-                    .await
-                    .map_err(|_| "Could not capture the desktop.".to_owned())?
-                {
+                match capture.await? {
                     crate::capture::CaptureOutcome::Cancelled => Ok(None),
                     crate::capture::CaptureOutcome::Captured(image) => {
                         tokio::task::spawn_blocking(move || {
                             Some(Arc::new(crate::capture::Prepared::new(image)))
                         })
                         .await
-                        .map_err(|_| "Could not prepare the desktop capture.".to_owned())
+                        .map_err(|_| crate::capture::CaptureError::PrepareFailed)
                     }
                 }
             },
             move |result| Message::CaptureFinished(id, result),
         )
     }
+    fn capture_in_progress(&self) -> bool {
+        self.pending_capture.is_some() || self.active_capture.is_some()
+    }
+    fn capture_busy(&mut self) -> Task<Message> {
+        self.capture_busy_notice = true;
+        Task::none()
+    }
     fn begin_capture(&mut self, mode: crate::capture::CaptureMode) -> Task<Message> {
+        self.begin_capture_with(mode, Self::capture_task)
+    }
+    fn begin_capture_with(
+        &mut self,
+        mode: crate::capture::CaptureMode,
+        capture: impl FnOnce(crate::jobs::JobId, crate::capture::CaptureMode) -> Task<Message>,
+    ) -> Task<Message> {
+        if self.capture_in_progress() {
+            return self.capture_busy();
+        }
+        self.capture_busy_notice = false;
         let id = self.reset_source();
         self.capture_mode = mode;
         self.screen_results = true;
@@ -324,29 +356,43 @@ impl App {
         self.temporary_closes
             .extend(self.retired_overlays.iter().copied());
         if self.temporary_closes.is_empty() {
-            Self::capture_task(id, self.capture_mode)
+            self.active_capture = Some(id);
+            capture(id, self.capture_mode)
         } else {
             Task::batch(windows.into_iter().map(window::close))
         }
     }
     fn command(&mut self, command: Command) -> Task<Message> {
+        self.command_with_capture(command, Self::capture_task)
+    }
+    fn command_with_capture(
+        &mut self,
+        command: Command,
+        capture: impl FnOnce(crate::jobs::JobId, crate::capture::CaptureMode) -> Task<Message>,
+    ) -> Task<Message> {
         match command {
+            Command::ScanScreen | Command::ScanRegion if self.capture_in_progress() => {
+                self.capture_busy()
+            }
+            Command::ScanCamera if self.active_capture.is_some() => self.capture_busy(),
             Command::Quit => {
                 self.reset_source();
                 self.overlay_close_tasks().chain(iced::exit())
             }
-            Command::Show if self.pending_capture.is_some() || self.pending_spatial.is_some() => {
+            Command::Show if self.capture_in_progress() || self.pending_spatial.is_some() => {
                 Task::none()
             }
             Command::Show => Task::batch([self.dismiss_overlay(), self.open()]),
             Command::Background => Task::none(),
-            Command::ScanScreen | Command::ScanRegion
-                if self.pending_capture.is_some() || self.pending_spatial.is_some() =>
-            {
+            Command::ScanScreen | Command::ScanRegion if self.pending_spatial.is_some() => {
                 Task::none()
             }
-            Command::ScanScreen => self.begin_capture(crate::capture::CaptureMode::Quick),
-            Command::ScanRegion => self.begin_capture(crate::capture::CaptureMode::Region),
+            Command::ScanScreen => {
+                self.begin_capture_with(crate::capture::CaptureMode::Quick, capture)
+            }
+            Command::ScanRegion => {
+                self.begin_capture_with(crate::capture::CaptureMode::Region, capture)
+            }
             Command::CopyResult(session, index) if session == self.result_session().0 => {
                 self.update_inner(Message::CopyResult(index))
             }
@@ -518,7 +564,7 @@ impl App {
             }
             Message::UserCommand(c) => {
                 if matches!(c, Command::ScanScreen | Command::ScanRegion)
-                    && self.pending_capture.is_none()
+                    && !self.capture_in_progress()
                     && self.pending_spatial.is_none()
                 {
                     self.windowless = false;
@@ -527,7 +573,7 @@ impl App {
             }
             Message::InstanceCommand(c) => {
                 if matches!(c, Command::ScanScreen | Command::ScanRegion)
-                    && self.pending_capture.is_none()
+                    && !self.capture_in_progress()
                     && self.pending_spatial.is_none()
                 {
                     self.windowless = true;
@@ -536,7 +582,7 @@ impl App {
             }
             Message::TrayHostChanged(available) => {
                 if self.state.host_changed(available)
-                    && self.pending_capture.is_none()
+                    && !self.capture_in_progress()
                     && self.pending_spatial.is_none()
                 {
                     Task::batch([self.dismiss_overlay(), self.open()])
@@ -552,7 +598,10 @@ impl App {
                 if self.temporary_closes.remove(&id) {
                     return if self.temporary_closes.is_empty() {
                         self.pending_capture
-                            .map(|id| Self::capture_task(id, self.capture_mode))
+                            .map(|id| {
+                                self.active_capture = Some(id);
+                                Self::capture_task(id, self.capture_mode)
+                            })
                             .unwrap_or_else(Task::none)
                     } else {
                         Task::none()
@@ -574,6 +623,10 @@ impl App {
                 }
             }
             Message::CaptureFinished(id, result) => {
+                if self.active_capture == Some(id) {
+                    self.active_capture = None;
+                    self.capture_busy_notice = false;
+                }
                 if id.0 != self.state.session
                     || (self.windowless && self.pending_capture != Some(id))
                 {
@@ -598,7 +651,10 @@ impl App {
                         self.screenshot = None;
                         self.state.capture_cancelled = true;
                     }
-                    Err(_) => self.state.error = Some("Could not capture the desktop.".into()),
+                    Err(error) => {
+                        self.capture_error = Some(error);
+                        self.state.error = Some(error.message().into());
+                    }
                 }
                 if self.windowless && self.state.host_available {
                     Task::none()
@@ -606,6 +662,7 @@ impl App {
                     self.open()
                 }
             }
+            Message::DesktopCapture if self.capture_in_progress() => self.capture_busy(),
             Message::DesktopCapture => {
                 self.windowless = false;
                 self.more_open = false;
@@ -951,10 +1008,9 @@ impl App {
             },
             move |result| match result {
                 Ok(image) => Message::DecodeRequested(id, image),
-                Err(_) => Message::CaptureFinished(
-                    id,
-                    Err("Could not prepare the desktop capture.".into()),
-                ),
+                Err(_) => {
+                    Message::CaptureFinished(id, Err(crate::capture::CaptureError::PrepareFailed))
+                }
             },
         )
     }
@@ -1036,13 +1092,24 @@ impl App {
                 entry
             })
             .collect();
-        let notification = if !self.windowless || self.pending_capture.is_some() || self.state.busy
-        {
+        let notification = if self.capture_busy_notice && self.capture_in_progress() {
+            Some(Notice {
+                title: "Desktop capture in progress".into(),
+                body: "Finish or cancel the current capture before starting another scan.".into(),
+            })
+        } else if !self.windowless || self.capture_in_progress() || self.state.busy {
             None
         } else if self.state.error.is_some() {
             Some(Notice {
                 title: "QR scan failed".into(),
-                body: "Could not scan. Try again or open QR Scanner for details.".into(),
+                body: self
+                    .capture_error
+                    .filter(|error| self.state.error.as_deref() == Some(error.message()))
+                    .map_or(
+                        "Could not scan. Try again or open QR Scanner for details.",
+                        |error| error.message(),
+                    )
+                    .into(),
             })
         } else if self.state.capture_cancelled {
             None

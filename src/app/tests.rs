@@ -53,6 +53,9 @@ pub(super) mod capture_tests {
             selecting: false,
             crop_epoch: 0,
             pending_capture: None,
+            active_capture: None,
+            capture_busy_notice: false,
+            capture_error: None,
             capture_mode: crate::capture::CaptureMode::Quick,
             temporary_closes: Default::default(),
         }
@@ -173,7 +176,12 @@ mod temporary_capture_tests {
         assert!(app.state.window_ids.is_empty());
         assert!(app.update(Message::WindowClosed(second)).units() > 0);
         assert_eq!(app.state.session, id.0);
-        let _ = app.update(Message::CaptureFinished(id, Err("denied".into())));
+        let _ = app.update(Message::CaptureFinished(
+            id,
+            Err(crate::capture::CaptureError::from(anyhow::anyhow!(
+                "denied"
+            ))),
+        ));
         assert_eq!(
             app.state.error.as_deref(),
             Some("Could not capture the desktop.")
@@ -194,7 +202,12 @@ mod temporary_capture_tests {
         let _ = app.update(Message::WindowClosed(window));
         assert_eq!(app.state.session, session);
         assert_eq!(app.state.window_ids.len(), 1);
-        let _ = app.update(Message::CaptureFinished(old, Err("old failure".into())));
+        let _ = app.update(Message::CaptureFinished(
+            old,
+            Err(crate::capture::CaptureError::from(anyhow::anyhow!(
+                "old failure"
+            ))),
+        ));
         assert_ne!(app.state.error.as_deref(), Some("old failure"));
     }
 }
@@ -320,7 +333,9 @@ mod quick_capture_tests {
         assert_eq!(app.capture_mode, crate::capture::CaptureMode::Interactive);
         let _ = app.update(Message::CaptureFinished(
             id,
-            Err("Permission denied".into()),
+            Err(crate::capture::CaptureError::from(anyhow::anyhow!(
+                "Permission denied"
+            ))),
         ));
         assert_eq!(
             app.state.error.as_deref(),
@@ -1053,7 +1068,9 @@ fn tray_results_notify_and_reject_old_buttons_without_os_actions() {
     assert!(app.result_actions.is_empty());
     let _ = app.update(Message::CaptureFinished(
         crate::jobs::JobId(app.state.session),
-        Err("capture error".into()),
+        Err(crate::capture::CaptureError::from(anyhow::anyhow!(
+            "capture error"
+        ))),
     ));
     assert!(app.state.window_ids.is_empty());
     assert_eq!(

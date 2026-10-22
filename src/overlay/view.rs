@@ -176,17 +176,12 @@ impl canvas::Program<Event> for Screen<'_> {
                     .with_color(color)
                     .with_width(if focused || selected { 3. } else { 2. }),
             );
-            let x = corners
-                .iter()
-                .map(|p| p.x)
-                .fold(f32::INFINITY, f32::min)
-                .clamp(0., (bounds.width - 28.).max(0.));
-            let y = corners
-                .iter()
-                .map(|p| p.y)
-                .fold(f32::INFINITY, f32::min)
-                .clamp(0., (bounds.height - 26.).max(0.));
-            frame.fill_rectangle(Point::new(x, y), Size::new(28., 26.), color);
+            let badge = geometry::badge_bounds(
+                geometry::detection_bounds(detection, &transform),
+                bounds.size(),
+            );
+            let (x, y) = (badge.x, badge.y);
+            frame.fill_rectangle(badge.position(), badge.size(), color);
             frame.fill_text(canvas::Text {
                 content: (index + 1).to_string(),
                 position: Point::new(x + 8., y + 3.),
@@ -347,13 +342,18 @@ fn surface(m: &Model, viewport: Size) -> Element<'_, Event> {
     if let (Some(result), Some(bounds)) = (m.selected_result(), m.panel_bounds(viewport)) {
         layers = layers.push(pin(panel(m, result, bounds)).position(bounds.position()));
     }
-    // The close control is drawn last and stays accessible even beside edge panels.
-    layers = layers.push(
-        pin(opaque(
-            control(m, "Close · Esc", Focus::Close, false).on_press(Event::Close),
-        ))
-        .position(Point::new((viewport.width - 132.).max(0.), 12.)),
-    );
+    // Render exactly the bounds used by the model's visibility rules.
+    if let Some(bounds) = m.close_bounds(viewport) {
+        layers = layers.push(
+            pin(opaque(
+                control(m, "Close · Esc", Focus::Close, false)
+                    .width(bounds.width)
+                    .height(bounds.height)
+                    .on_press(Event::Close),
+            ))
+            .position(bounds.position()),
+        );
+    }
     layers.into()
 }
 

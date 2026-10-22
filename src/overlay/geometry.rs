@@ -89,6 +89,20 @@ pub fn detection_bounds(detection: &Detection, transform: &Transform) -> Rectang
     }
 }
 
+/// The number badge and visibility rules use the same clamped footprint.
+pub fn badge_bounds(bounds: Rectangle, viewport: Size) -> Rectangle {
+    Rectangle {
+        x: bounds.x.clamp(0., (viewport.width - 28.).max(0.)),
+        y: bounds.y.clamp(0., (viewport.height - 26.).max(0.)),
+        width: 28.,
+        height: 26.,
+    }
+}
+pub fn highlight_bounds(detection: &Detection, transform: &Transform, viewport: Size) -> Rectangle {
+    let bounds = detection_bounds(detection, transform);
+    bounds.expand(4.).union(&badge_bounds(bounds, viewport))
+}
+
 /// Places a panel below the highlight where possible and clamps it to the viewport.
 /// Callers render large contents in a scrollable within these bounds.
 pub fn panel_bounds(highlight: Rectangle, requested: Size, viewport: Size) -> Rectangle {

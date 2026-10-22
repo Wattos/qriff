@@ -271,9 +271,9 @@ git diff --check
 ```
 
 Formatting, Clippy (all targets, warnings denied), the full Rust suite, Python,
-release build and diff check all exited 0. Rust passed **156 unit + 19
-integration tests (175 total)**; main/doc targets contain zero tests. Python
-passed **1** runtime-probe regression. Cargo used the shared checkout target
+release build and diff check all exited 0. After the final review fixes, Rust
+passed **165 unit + 19 integration tests (184 total)**; main/doc targets contain
+zero tests. Python passed **1** runtime-probe regression. Cargo used the shared checkout target
 directory. A local-link check resolved **22** Markdown file/anchor links across
 README and this document; all four new PNGs passed signature, dimensions, chunk
 CRC and decompression checks and were visually inspected.
@@ -333,7 +333,16 @@ and ordinary desktop/camera workflow preservation. Private D-Bus tests verify
 notifications, markup and stale action delivery. Fake executable tests verify
 Spectacle arguments, private image cleanup and exact wl-copy stdin. Controller
 copy tests use a side-effect-free writer and verify the current guarded selection.
-These tests do not modify the real clipboard or execute real QR actions.
+The final review regressions add a fake pending provider for
+Scan region → Scan camera → Scan region, source-reset and stale-completion guards,
+and pending-capture feedback. Close-control placement shares geometry with its
+rendering, and model tests cover a small top-right QR before selection/auto-copy
+plus keyboard Close access when every corner is occupied. Typed unsupported-area
+and missing-Spectacle errors retain fixed recovery guidance through capture tasks,
+controller state and notifications; arbitrary provider diagnostics remain redacted.
+These tests do not modify the real clipboard or execute real QR actions. The
+native PNGs above predate the final Close-placement change; its new placement has
+automated geometry/model coverage, not additional native or physical acceptance.
 
 Physical mouse/keyboard selection and hover, text dragging/Ctrl+C, clipboard
 ownership after overlay dismissal, portal screenshot-to-desktop alignment,

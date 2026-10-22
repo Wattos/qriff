@@ -234,11 +234,15 @@ payloads have separate highlights but one retained Last scan entry. Hover
 emphasizes a region. Tab/Shift+Tab cycle detections and panel controls; Enter
 selects the focused detection or activates its focused control. A panel that
 covers a keyboard-focused detection is temporarily hidden to expose that target.
+Close moves to a clear corner when possible. In a crowded layout it can hide
+while a detection has keyboard focus, then returns when Tab reaches Close.
 Clicking background clears selection and consumes the click. Escape clears the
 selected panel first, then closes the overlay. The visible Close control is also
 keyboard reachable. No codes or decode failure produces a concise notification
 without an empty overlay; cancellation returns to the desktop. Repeated scan
-requests are suppressed while capture/decode is pending.
+requests are suppressed while capture/decode is pending. While a native capture
+selector or permission request is outstanding, camera starts are also suppressed;
+a notification asks you to finish or cancel the current capture before retrying.
 
 Copy keeps the overlay open. Explicit Open URL, Call or Connect Wi-Fi closes it
 before dispatch, while retaining pending-action suppression and feedback in
@@ -257,9 +261,10 @@ a notification and Last scan rather than incorrectly positioned highlights.
 A single region result can offer Copy and its validated action when the
 notification server supports actions; multiple results use a summary.
 On other desktops direct region selection requires Screenshot portal v3 with
-Area support. If unavailable, the scanner reports that limitation; Scan screen
-and explicit Desktop capture… remain available. There is no automatic second
-capture dialog.
+Area support. If unavailable, the scanner reports that limitation in the app and
+notification and points to Scan screen or explicit Desktop capture…. Missing
+Spectacle gets separate installation and alternative-capture guidance. There is
+no automatic second capture dialog.
 
 Overlay and tray/notification copying needs `wl-copy` from **wl-clipboard** and
 a compositor with Wayland data-control support. Full Copy and Ctrl+C/Cut of a

@@ -159,6 +159,43 @@ impl Model {
             self.viewport,
         )
     }
+    fn close_bounds(&self, viewport: Size) -> Option<iced::Rectangle> {
+        let size = Size::new(viewport.width.min(120.), viewport.height.min(36.));
+        let right = (viewport.width - size.width - 12.).max(0.);
+        let left = 12_f32.min((viewport.width - size.width).max(0.));
+        let top = 12_f32.min((viewport.height - size.height).max(0.));
+        let bottom = (viewport.height - size.height - 12.).max(0.);
+        let candidates = [(right, top), (right, bottom), (left, top), (left, bottom)]
+            .map(|(x, y)| iced::Rectangle::new(iced::Point::new(x, y), size));
+        let transform = geometry::Transform::new(
+            [self.frozen.image.width(), self.frozen.image.height()],
+            viewport,
+        )?;
+        let overlaps = |index: usize, bounds: &iced::Rectangle| {
+            self.scan.detections.get(index).is_some_and(|detection| {
+                geometry::highlight_bounds(detection, &transform, viewport).intersects(bounds)
+            })
+        };
+        // Prefer a stable corner that leaves every detection pointer-accessible.
+        if let Some(bounds) = candidates.iter().find(|bounds| {
+            !self
+                .scan
+                .detections
+                .iter()
+                .enumerate()
+                .any(|(i, _)| overlaps(i, bounds))
+        }) {
+            return Some(*bounds);
+        }
+        // A crowded image can occupy every corner. Uncover keyboard focus even
+        // then; Tab to Close restores the control and its visible focus ring.
+        if let Some(Focus::Detection(index)) = self.focus {
+            return candidates
+                .into_iter()
+                .find(|bounds| !overlaps(index, bounds));
+        }
+        Some(candidates[0])
+    }
     fn panel_bounds(&self, viewport: Size) -> Option<iced::Rectangle> {
         let detection = self.scan.detections.get(self.selected?)?;
         let transform = geometry::Transform::new(
@@ -171,9 +208,7 @@ impl Model {
         // outline instead of allowing the opaque panel to hide its focus ring.
         if let Some(Focus::Detection(index)) = self.focus
             && let Some(focused) = self.scan.detections.get(index)
-            && geometry::detection_bounds(focused, &transform)
-                .expand(4.)
-                .intersects(&bounds)
+            && geometry::highlight_bounds(focused, &transform, viewport).intersects(&bounds)
         {
             return None;
         }

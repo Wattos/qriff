@@ -23,6 +23,42 @@ pub enum CaptureOutcome {
     Captured(image::DynamicImage),
     Cancelled,
 }
+/// Fixed, secret-safe categories are the only capture errors exposed to the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureError {
+    Failed,
+    RegionUnavailable,
+    SpectacleUnavailable,
+    PrepareFailed,
+}
+impl CaptureError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Failed => "Could not capture the desktop.",
+            Self::RegionUnavailable => {
+                "Direct region selection is unavailable on this desktop. Use Scan screen or Desktop capture instead."
+            }
+            Self::SpectacleUnavailable => {
+                "Spectacle is required for native region selection on KDE. Install Spectacle, or use Scan screen or Desktop capture instead."
+            }
+            Self::PrepareFailed => "Could not prepare the desktop capture.",
+        }
+    }
+}
+impl std::fmt::Display for CaptureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+impl std::error::Error for CaptureError {}
+impl From<anyhow::Error> for CaptureError {
+    fn from(error: anyhow::Error) -> Self {
+        error
+            .downcast_ref::<Self>()
+            .copied()
+            .unwrap_or(Self::Failed)
+    }
+}
 fn load_response(
     result: anyhow::Result<Option<String>>,
     loader: impl FnOnce(&std::path::Path) -> anyhow::Result<image::DynamicImage>,
@@ -46,20 +82,26 @@ pub enum CaptureMode {
 fn screenshot_options(
     mode: CaptureMode,
     area_available: bool,
-) -> ashpd::desktop::screenshot::ScreenshotOptions {
+) -> Result<ashpd::desktop::screenshot::ScreenshotOptions, CaptureError> {
+    if mode == CaptureMode::Region && !area_available {
+        return Err(CaptureError::RegionUnavailable);
+    }
     use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotOptions};
     let options = ScreenshotOptions::default()
         .set_interactive(mode != CaptureMode::Quick)
         .set_modal(false);
     if mode != CaptureMode::Quick && area_available {
-        options.set_target(AvailableTargets::Area)
+        Ok(options.set_target(AvailableTargets::Area))
     } else {
-        options
+        Ok(options)
     }
 }
 
 /// Request a screenshot using the desktop portal.
-pub async fn screenshot(mode: CaptureMode) -> anyhow::Result<CaptureOutcome> {
+pub async fn screenshot(mode: CaptureMode) -> Result<CaptureOutcome, CaptureError> {
+    screenshot_inner(mode).await.map_err(CaptureError::from)
+}
+async fn screenshot_inner(mode: CaptureMode) -> anyhow::Result<CaptureOutcome> {
     use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotProxy};
     if mode == CaptureMode::Region
         && std::env::var("XDG_CURRENT_DESKTOP")
@@ -74,12 +116,7 @@ pub async fn screenshot(mode: CaptureMode) -> anyhow::Result<CaptureOutcome> {
             .available_targets()
             .await
             .is_ok_and(|targets| targets.contains(AvailableTargets::Area));
-    if mode == CaptureMode::Region && !area_available {
-        anyhow::bail!(
-            "Direct region selection is unavailable on this desktop. Use Scan screen or Desktop capture instead."
-        );
-    }
-    let options = screenshot_options(mode, area_available);
+    let options = screenshot_options(mode, area_available)?;
     let response = match proxy.screenshot(None, options).await {
         Ok(request) => request.response(),
         Err(error) => Err(error),
@@ -113,8 +150,12 @@ async fn spectacle_region_using(executable: &std::path::Path) -> anyhow::Result<
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| {
-            anyhow::anyhow!("Spectacle is required for native region selection on KDE.")
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                CaptureError::SpectacleUnavailable
+            } else {
+                CaptureError::Failed
+            }
         })?;
     let status = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait())
         .await
@@ -199,10 +240,40 @@ mod capture_mode_tests {
     ) -> std::collections::HashMap<String, OwnedValue> {
         let bytes = zvariant::to_bytes(
             Context::new_dbus(LE, 0),
-            &screenshot_options(mode, area_available),
+            &screenshot_options(mode, area_available).unwrap(),
         )
         .unwrap();
         bytes.deserialize().unwrap().0
+    }
+    #[test]
+    fn unsupported_region_is_typed_and_never_builds_an_alternative_dialog() {
+        assert!(matches!(
+            screenshot_options(CaptureMode::Region, false),
+            Err(CaptureError::RegionUnavailable)
+        ));
+        let options = wire_options(CaptureMode::Region, true);
+        assert_eq!(
+            u32::try_from(options["target"].try_clone().unwrap()).unwrap(),
+            4
+        );
+    }
+    #[test]
+    fn provider_diagnostics_cannot_impersonate_safe_categories() {
+        for detail in [
+            "private provider details",
+            CaptureError::RegionUnavailable.message(),
+        ] {
+            assert_eq!(
+                CaptureError::from(anyhow::anyhow!(detail)),
+                CaptureError::Failed
+            );
+        }
+        assert_eq!(
+            CaptureError::from(
+                anyhow::Error::new(CaptureError::RegionUnavailable).context("private context")
+            ),
+            CaptureError::RegionUnavailable
+        );
     }
     #[test]
     fn quick_capture_never_requests_a_dialog_or_native_area_selector() {
@@ -229,6 +300,18 @@ mod capture_mode_tests {
 mod region_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn missing_region_provider_explains_available_alternatives() {
+        let fixture = tempfile::tempdir().unwrap();
+        let error = spectacle_region_using(&fixture.path().join("missing-spectacle"))
+            .await
+            .unwrap_err();
+        let error = CaptureError::from(error);
+        assert_eq!(error, CaptureError::SpectacleUnavailable);
+        assert!(error.to_string().contains("Spectacle"));
+        assert!(error.to_string().contains("Scan screen"));
+        assert!(error.to_string().contains("Desktop capture"));
+    }
     #[tokio::test]
     async fn region_capture_uses_release_selector_private_file_and_removes_it() {
         let fixture = tempfile::tempdir().unwrap();
