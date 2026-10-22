@@ -73,6 +73,22 @@ pub fn hit_test(detections: &[Detection], transform: &Transform, point: Point) -
     })
 }
 
+/// Axis-aligned extent of the transformed quadrilateral, for panel placement.
+/// Pointer hit testing continues to use the actual quadrilateral.
+pub fn detection_bounds(detection: &Detection, transform: &Transform) -> Rectangle {
+    let points = detection.corners.map(|p| transform.to_surface(p));
+    let x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+    let y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+    let right = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+    let bottom = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+    Rectangle {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
+}
+
 /// Places a panel below the highlight where possible and clamps it to the viewport.
 /// Callers render large contents in a scrollable within these bounds.
 pub fn panel_bounds(highlight: Rectangle, requested: Size, viewport: Size) -> Rectangle {

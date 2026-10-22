@@ -149,6 +149,26 @@ impl Model {
             self.viewport,
         )
     }
+    fn panel_bounds(&self, viewport: Size) -> Option<iced::Rectangle> {
+        let detection = self.scan.detections.get(self.selected?)?;
+        let transform = geometry::Transform::new(
+            [self.frozen.image.width(), self.frozen.image.height()],
+            viewport,
+        )?;
+        let highlight = geometry::detection_bounds(detection, &transform).expand(8.);
+        let bounds = geometry::panel_bounds(highlight, Size::new(380., 330.), viewport);
+        // Keep every detection in the cycle. Temporarily uncover a focused
+        // outline instead of allowing the opaque panel to hide its focus ring.
+        if let Some(Focus::Detection(index)) = self.focus
+            && let Some(focused) = self.scan.detections.get(index)
+            && geometry::detection_bounds(focused, &transform)
+                .expand(4.)
+                .intersects(&bounds)
+        {
+            return None;
+        }
+        Some(bounds)
+    }
     pub fn set_action_state(&mut self, state: ActionState) {
         if state.key.session == self.session && state.key.result_index < self.scan.results.len() {
             self.actions.insert(state.key.result_index, state);
@@ -242,12 +262,15 @@ impl Model {
                     return Effect::None;
                 };
                 if self.selected == Some(index) {
+                    self.focus = Some(Focus::Text);
                     return Effect::None;
                 }
                 let result = d.result_index;
                 self.clear_selection();
                 self.selected = Some(index);
-                self.focus = Some(Focus::Detection(index));
+                // Selection opens usable actions even if a large/edge code has
+                // no panel placement that leaves the selected outline uncovered.
+                self.focus = Some(Focus::Text);
                 self.refresh_text();
                 if auto_copy && self.auto_copied.insert(result) {
                     return Effect::Copy(result);

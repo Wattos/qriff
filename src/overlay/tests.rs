@@ -155,14 +155,16 @@ fn keyboard_cycles_panel_controls_forward_and_reverse_with_pending_action_remove
     assert_eq!(
         visited,
         vec![
-            Some(Focus::Text),
             Some(Focus::Reveal),
             Some(Focus::Copy),
             Some(Focus::Activate),
             Some(Focus::Close),
-            Some(Focus::Detection(0))
+            Some(Focus::Detection(0)),
+            Some(Focus::Text)
         ]
     );
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
     m.update(Event::Next(true), false);
     assert_eq!(m.focus(), Some(Focus::Close));
     m.update(Event::Next(true), false);
@@ -224,7 +226,7 @@ async fn native_text_focus_uses_current_overlay_identity_and_unfocuses_when_leav
     }
     let mut m = model(&["plain"], &[0]);
     m.update(Event::Select(0), false);
-    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Text));
     let mut state = NativeFocus(false);
     let id = Id::new("overlay-text-7-3");
     let bounds = iced::Rectangle::default();
@@ -268,4 +270,136 @@ async fn native_focus_task_cannot_unfocus_a_newer_overlay_editor() {
     };
     operation.focusable(Some(&id), iced::Rectangle::default(), &mut current);
     assert!(current.is_focused());
+}
+
+fn overlapping_panel_model() -> Model {
+    let mut m = model(&["https://example.org/first", "second"], &[0, 1]);
+    m.frozen = Arc::new(Prepared::new(image::DynamicImage::new_rgba8(1000, 800)));
+    m.resize(iced::Size::new(1000., 800.));
+    m.scan.detections[0].corners = [[100., 100.], [140., 100.], [140., 140.], [100., 140.]];
+    m.scan.detections[1].corners = [[150., 200.], [190., 200.], [190., 240.], [150., 240.]];
+    m
+}
+#[test]
+fn keyboard_reveals_detection_covered_by_panel_before_enter_can_select_or_copy_it() {
+    for backward in [false, true] {
+        let mut m = overlapping_panel_model();
+        let viewport = iced::Size::new(1000., 800.);
+        m.update(Event::Select(0), false);
+        assert_eq!(
+            m.panel_bounds(viewport),
+            Some(iced::Rectangle {
+                x: 92.,
+                y: 148.,
+                width: 380.,
+                height: 330.
+            })
+        );
+        if !backward {
+            for _ in 0..4 {
+                assert_eq!(m.update(Event::Next(false), true), Effect::None);
+            }
+            assert_eq!(m.focus(), Some(Focus::Detection(0)));
+        }
+        assert_eq!(m.update(Event::Next(backward), true), Effect::None);
+        assert_eq!(m.focus(), Some(Focus::Detection(1)));
+        assert_eq!(m.selected_result(), Some(0));
+        // The responsive view uses this same panel layout: no opaque panel is
+        // drawn above the focused region before explicit Enter selects it.
+        assert_eq!(m.panel_bounds(viewport), None);
+        assert_eq!(m.update(Event::ActivateFocused, true), Effect::Copy(1));
+        assert_eq!(m.selected_result(), Some(1));
+        assert_eq!(m.focus(), Some(Focus::Text));
+        assert!(m.panel_bounds(viewport).is_some());
+    }
+}
+#[test]
+fn covered_detection_navigation_preserves_access_to_selected_panel_controls_both_directions() {
+    let mut m = overlapping_panel_model();
+    let viewport = iced::Size::new(1000., 800.);
+    m.update(Event::Select(0), false);
+    m.update(Event::Next(true), false);
+    assert_eq!(m.panel_bounds(viewport), None);
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Text));
+    assert!(m.panel_bounds(viewport).is_some());
+    assert_eq!(m.selected_result(), Some(0));
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Detection(1)));
+    assert_eq!(m.panel_bounds(viewport), None);
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
+    assert!(m.panel_bounds(viewport).is_some());
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Close));
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Activate));
+    assert!(m.panel_bounds(viewport).is_some());
+}
+#[test]
+fn selecting_oversized_code_opens_panel_and_navigation_can_uncover_its_own_outline() {
+    let mut m = overlapping_panel_model();
+    m.scan.detections.truncate(1);
+    m.scan.detections[0].corners = [[0., 0.], [1000., 0.], [1000., 800.], [0., 800.]];
+    let viewport = iced::Size::new(1000., 800.);
+    m.update(Event::Select(0), false);
+    assert_eq!(m.focus(), Some(Focus::Text));
+    assert_eq!(
+        m.panel_bounds(viewport),
+        Some(iced::Rectangle {
+            x: 0.,
+            y: 0.,
+            width: 380.,
+            height: 330.
+        })
+    );
+    assert_eq!(m.update(Event::Copy, false), Effect::Copy(0));
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
+    assert_eq!(m.panel_bounds(viewport), None);
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Text));
+    assert!(m.panel_bounds(viewport).is_some());
+}
+
+#[test]
+fn enter_on_already_selected_edge_code_reopens_panel_without_another_auto_copy() {
+    let mut m = model(&["plain"], &[0]);
+    let viewport = iced::Size::new(100., 80.);
+    m.resize(viewport);
+    assert_eq!(m.update(Event::Select(0), true), Effect::Copy(0));
+    assert_eq!(m.focus(), Some(Focus::Text));
+    assert!(m.panel_bounds(viewport).is_some());
+    m.update(Event::Next(true), true);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
+    assert_eq!(m.panel_bounds(viewport), None);
+    assert_eq!(m.update(Event::ActivateFocused, true), Effect::None);
+    assert_eq!(m.focus(), Some(Focus::Text));
+    assert!(m.panel_bounds(viewport).is_some());
+    assert_eq!(m.selected_result(), Some(0));
+}
+#[test]
+fn responsive_panel_visibility_uses_rendered_viewport_when_stored_size_differs() {
+    let mut m = overlapping_panel_model();
+    let viewport = iced::Size::new(200., 160.);
+    m.update(Event::Select(0), false);
+    m.update(Event::Next(true), false);
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
+    assert!(m.panel_bounds(iced::Size::new(1000., 800.)).is_some());
+    // At the actual smaller render size the clamped panel fills the surface,
+    // so the selected code must be uncovered even before resize is delivered.
+    assert_eq!(m.panel_bounds(viewport), None);
+    m.update(Event::Next(false), false);
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Text));
+    assert_eq!(
+        m.panel_bounds(viewport),
+        Some(iced::Rectangle {
+            x: 0.,
+            y: 0.,
+            width: 200.,
+            height: 160.
+        })
+    );
 }

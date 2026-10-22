@@ -209,22 +209,6 @@ fn control<'a>(
         .padding([8, 12])
         .style(move |theme, status| style::focused(theme, status, primary, focused))
 }
-fn highlight_bounds(m: &Model, index: usize, transform: Option<geometry::Transform>) -> Rectangle {
-    let Some(t) = transform else {
-        return Rectangle::default();
-    };
-    let p = m.scan.detections[index].corners.map(|p| t.to_surface(p));
-    let x = p.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
-    let y = p.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
-    let right = p.iter().map(|p| p.x).fold(0., f32::max);
-    let bottom = p.iter().map(|p| p.y).fold(0., f32::max);
-    Rectangle {
-        x: x - 8.,
-        y: y - 8.,
-        width: right - x + 16.,
-        height: bottom - y + 16.,
-    }
-}
 fn panel(m: &Model, index: usize, bounds: Rectangle) -> Element<'_, Event> {
     let result = &m.scan.results[index];
     let title = match result.content {
@@ -371,12 +355,7 @@ fn surface(m: &Model, viewport: Size) -> Element<'_, Event> {
     ]
     .width(Length::Fill)
     .height(Length::Fill);
-    if let (Some(detection), Some(result)) = (m.selected, m.selected_result()) {
-        let bounds = geometry::panel_bounds(
-            highlight_bounds(m, detection, transform),
-            Size::new(380., 330.),
-            viewport,
-        );
+    if let (Some(result), Some(bounds)) = (m.selected_result(), m.panel_bounds(viewport)) {
         layers = layers.push(pin(panel(m, result, bounds)).position(bounds.position()));
     }
     // The close control is drawn last and stays accessible even beside edge panels.
