@@ -53,7 +53,7 @@ fn preserves_non_utf8_bytes() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].payload, [0, 255, 128, 65]);
     assert_eq!(results[0].display_text, "Binary payload (hex): 00 ff 80 41");
-    assert!(results[0].open_url.is_none());
+    assert!(results[0].action().is_none());
 }
 #[test]
 fn safe_urls_only() {
@@ -66,7 +66,7 @@ fn safe_urls_only() {
     ] {
         assert!(
             QrResult::from_payload(s.as_bytes().to_vec())
-                .open_url
+                .action()
                 .is_none(),
             "{s}"
         );
@@ -74,7 +74,9 @@ fn safe_urls_only() {
     for s in ["http://example.com/a", "https://example.org/?x=1"] {
         let result = QrResult::from_payload(s.as_bytes().to_vec());
         assert_eq!(result.display_text, s);
-        assert_eq!(result.open_url.unwrap().as_str(), s);
+        assert!(
+            matches!(result.action(), Some(qr_scanner::results::ResultAction::OpenUrl(u)) if u.as_str() == s)
+        );
     }
 }
 #[test]

@@ -297,11 +297,14 @@ impl App {
                 .map(|result| iced::clipboard::write(result.display_text.clone()))
                 .unwrap_or_else(Task::none),
             Message::OpenResult(index) => {
-                let Some(url) = self
-                    .state
-                    .results
-                    .get(index)
-                    .and_then(|result| result.open_url.clone())
+                let Some(url) =
+                    self.state
+                        .results
+                        .get(index)
+                        .and_then(|result| match result.action() {
+                            Some(crate::results::ResultAction::OpenUrl(url)) => Some(url),
+                            _ => None,
+                        })
                 else {
                     return Task::none();
                 };
@@ -451,7 +454,10 @@ impl App {
         let mut results = column![].spacing(12);
         for (index, result) in self.state.results.iter().enumerate() {
             let mut actions = row![button("Copy").on_press(Message::CopyResult(index))].spacing(8);
-            if result.open_url.is_some() {
+            if matches!(
+                result.action(),
+                Some(crate::results::ResultAction::OpenUrl(_))
+            ) {
                 actions = actions.push(button("Open").on_press(Message::OpenResult(index)));
             }
             results = results.push(column![text(&result.display_text), actions].spacing(4));
