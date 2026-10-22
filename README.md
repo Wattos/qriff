@@ -107,8 +107,14 @@ connections are not supported.
 
 ## Get started
 
-QRiff is in early development. The current installation path is **building from
-source** on Linux with stable Rust and the native dependencies installed.
+Linux x86_64 bundles are built by [GitHub Actions](https://github.com/Wattos/qriff/actions/workflows/linux-release.yml).
+Published versions are available on the [Releases page](https://github.com/Wattos/qriff/releases):
+choose **AppImage** for a single-file app, or **tar.gz** for an extracted bundle.
+Draft releases remain private until published.
+
+[Run a Linux bundle →](docs/usage.md#linux-bundles)
+
+To build from source, use stable Rust and the native dependencies below.
 
 [Install the prerequisites →](docs/usage.md#build-and-run)
 

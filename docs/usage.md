@@ -2,6 +2,45 @@
 
 [← Back to QRiff](../README.md)
 
+## Linux bundles
+
+The Linux bundles target **x86_64, Ubuntu 22.04 / glibc 2.35 or newer**.
+Other distributions with compatible libraries may work; they are not yet manually
+validated. Download a published release from
+[GitHub Releases](https://github.com/Wattos/qriff/releases).
+
+```sh
+sha256sum --check SHA256SUMS
+chmod +x QRiff-1.0.0-linux-x86_64.AppImage
+./QRiff-1.0.0-linux-x86_64.AppImage
+```
+
+If FUSE is unavailable, run with `--appimage-extract-and-run`, or use the archive:
+
+```sh
+tar -xzf QRiff-1.0.0-linux-x86_64.tar.gz
+./QRiff-1.0.0-linux-x86_64/AppRun
+```
+
+Both formats include `wl-copy` and application client libraries. They use your
+host's Wayland/X11 session, D-Bus, screenshot portal, desktop URI handlers
+(`xdg-utils`), and NetworkManager. KDE region capture requires host Spectacle.
+The bundles do not install a launcher automatically. Keep the extracted folder
+together and launch through `AppRun` so bundled libraries and helpers are found.
+
+### Building and releasing bundles
+
+`.github/workflows/linux-release.yml` tests and builds on Ubuntu 22.04, then runs
+`scripts/package-linux.sh`. Each successful build uploads an artifact containing
+an AppImage, a tar archive, and SHA256 checksums. PR builds never create releases.
+
+Run **Linux bundles** manually with **draft_release** enabled to attach the
+bundles to a draft for the version in Cargo.toml. Pushing a matching `vX.Y.Z` tag
+also creates or updates a draft. The workflow refuses to modify a published
+release. Review the draft and manually publish when ready; CI never publishes it.
+Version tags must match Cargo.toml and Cargo.lock. The linuxdeploy download is
+SHA256-checked; update its pinned digest deliberately when upgrading the tool.
+
 ## Build and run
 
 Use stable Rust and Cargo. Development was checked on KDE neon 24.04 / Plasma

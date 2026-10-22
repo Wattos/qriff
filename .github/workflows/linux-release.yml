@@ -1,0 +1,82 @@
+name: Linux bundles
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: Attach bundles to the draft release for the Cargo version
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install build and bundle dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libclang-dev linux-libc-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev wl-clipboard desktop-file-utils
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Read and validate version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "$REF_TYPE" == tag ]]; then test "$REF_NAME" = "v$version"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check and test
+        run: |
+          cargo +stable fmt --check
+          cargo +stable clippy --locked --all-targets -- -D warnings
+          cargo +stable test --locked
+      - name: Build executable
+        run: cargo +stable build --locked --release
+      - name: Package and smoke test
+        run: scripts/package-linux.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qriff-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    needs: build
+    if: github.event_name != 'pull_request' && (github.ref_type == 'tag' || inputs.draft_release == true)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: qriff-linux-x86_64
+          path: dist
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          TARGET_COMMIT: ${{ github.sha }}
+        run: |
+          tag="v$RELEASE_VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true
+          else
+            gh release create "$tag" --draft --target "$TARGET_COMMIT" --title "QRiff $tag" --generate-notes
+          fi
+          gh release upload "$tag" dist/* --clobber
