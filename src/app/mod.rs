@@ -1,19 +1,27 @@
+mod appearance;
 pub mod clipboard;
+mod focus;
+mod icons;
 pub mod state;
+mod style;
+mod view;
 use crate::{
     cli::Command,
     instance::{InstanceRole, Primary},
     tray,
 };
-use iced::{
-    Element, Subscription, Task,
-    widget::{button, column, container, row, scrollable, text},
-    window,
-};
+use iced::{Element, Subscription, Task, window};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub enum Message {
+    Appearance(bool, iced::Color),
+    ToggleMore,
+    ToggleSettings,
+    RevealPassword(usize),
+    Resized(f32),
+    FocusNext(bool),
+    KeyboardActivate,
     UserCommand(Command),
     InstanceCommand(Command),
     TrayHostChanged(bool),
@@ -60,6 +68,13 @@ impl std::hash::Hash for PrimarySource {
 }
 struct App {
     pub state: state::State,
+    focus: Option<focus::Target>,
+    dark: bool,
+    accent: iced::Color,
+    width: f32,
+    more_open: bool,
+    settings_open: bool,
+    revealed: std::collections::HashSet<usize>,
     preferences: crate::settings::Preferences,
     preferences_loaded: bool,
     preference_path: Option<std::path::PathBuf>,
@@ -97,6 +112,13 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                     background: command == Command::Background,
                     ..Default::default()
                 },
+                focus: None,
+                dark: false,
+                accent: style::BLUE,
+                width: 1020.0,
+                more_open: false,
+                settings_open: false,
+                revealed: Default::default(),
                 preferences: Default::default(),
                 preferences_loaded: false,
                 preference_path: None,
@@ -145,6 +167,8 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
         App::view,
     )
     .title("QR Scanner")
+    .default_font(iced::Font::with_name("Noto Sans"))
+    .theme(|app: &App, _| style::theme(app.dark, app.accent))
     .subscription(App::subscription)
     .run()
 }
@@ -152,6 +176,8 @@ impl App {
     /// All source switches (including camera) must invalidate decode/capture work here.
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.invalidate_source();
+        self.focus = None;
+        self.revealed.clear();
         self.copy_feedback = None;
         self.result_actions.clear();
         self.state.begin_session()
@@ -177,7 +203,7 @@ impl App {
             return window::set_mode(id, window::Mode::Windowed).chain(window::gain_focus(id));
         }
         let (id, task) = window::open(window::Settings {
-            size: iced::Size::new(760., 680.),
+            size: iced::Size::new(1020., 680.),
             exit_on_close_request: true,
             ..Default::default()
         });
@@ -246,6 +272,42 @@ impl App {
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Appearance(dark, accent) => {
+                self.dark = dark;
+                self.accent = accent;
+                Task::none()
+            }
+            Message::ToggleMore => {
+                self.more_open = !self.more_open;
+                self.settings_open = false;
+                Task::none()
+            }
+            Message::ToggleSettings => {
+                self.settings_open = !self.settings_open;
+                self.more_open = false;
+                Task::none()
+            }
+            Message::RevealPassword(index) => {
+                if !self.revealed.remove(&index) {
+                    self.revealed.insert(index);
+                }
+                Task::none()
+            }
+            Message::KeyboardActivate => {
+                if let Some(target) = self.focus.filter(|t| focus::targets(self).contains(t)) {
+                    self.update(target.message(self.preferences.auto_copy_single))
+                } else {
+                    Task::none()
+                }
+            }
+            Message::FocusNext(reverse) => {
+                self.focus = Some(focus::next(self, reverse));
+                Task::none()
+            }
+            Message::Resized(width) => {
+                self.width = width;
+                Task::none()
+            }
             Message::UserCommand(c) | Message::InstanceCommand(c) => self.command(c),
             Message::TrayHostChanged(available) => {
                 if self.state.host_changed(available) && self.pending_capture.is_none() {
@@ -299,7 +361,10 @@ impl App {
                 }
                 self.open()
             }
-            Message::DesktopCapture => self.begin_capture(crate::capture::CaptureMode::Interactive),
+            Message::DesktopCapture => {
+                self.more_open = false;
+                self.begin_capture(crate::capture::CaptureMode::Interactive)
+            }
             Message::ScanFull => self.scan_screenshot(None),
             Message::SelectRegion => {
                 self.crop_epoch = self.crop_epoch.wrapping_add(1);
@@ -307,6 +372,9 @@ impl App {
                 Task::none()
             }
             Message::CancelCrop => {
+                self.focus = None;
+                self.more_open = false;
+                self.settings_open = false;
                 self.crop_epoch = self.crop_epoch.wrapping_add(1);
                 self.selecting = false;
                 Task::none()
@@ -547,6 +615,8 @@ impl App {
             return Task::none();
         };
         self.decoder.cancel();
+        self.focus = None;
+        self.revealed.clear();
         let id = self.state.begin_session();
         Task::perform(
             async move {
@@ -584,131 +654,8 @@ impl App {
             "Ready"
         }
     }
-    fn view(&self, _id: window::Id) -> Element<'_, Message> {
-        let status = self.status();
-        let mut results = column![].spacing(12);
-        for (index, result) in self.state.results.iter().enumerate() {
-            let mut actions = row![button("Copy").on_press(Message::CopyResult(index))].spacing(8);
-            if let Some(action) = result.action() {
-                let label = match action {
-                    crate::results::ResultAction::OpenUrl(_) => "Open URL",
-                    crate::results::ResultAction::Call(_) => "Call",
-                    crate::results::ResultAction::ConnectWifi(_) => "Connect",
-                };
-                let pending = self.result_actions.get(&index).is_some_and(|state| {
-                    state.key.session.0 == self.state.session
-                        && matches!(state.status, crate::actions::ActionStatus::Pending)
-                });
-                let mut activate = button(if pending { "Working…" } else { label });
-                if !pending {
-                    activate = activate.on_press(Message::ActivateResult(index));
-                }
-                actions = actions.push(activate);
-            }
-            let mut card = column![text(&result.display_text), actions].spacing(4);
-            if let Some(state) = self
-                .result_actions
-                .get(&index)
-                .filter(|state| state.key.session.0 == self.state.session)
-            {
-                match &state.status {
-                    crate::actions::ActionStatus::Failed(error) => {
-                        card = card.push(text(error.to_string()))
-                    }
-                    crate::actions::ActionStatus::Succeeded => {
-                        card = card.push(text(
-                            if matches!(result.content, crate::results::QrContent::Wifi(_)) {
-                                "Connected. This connection is removed when disconnected."
-                            } else {
-                                "Opened in the desktop app."
-                            },
-                        ))
-                    }
-                    crate::actions::ActionStatus::Pending => {}
-                }
-            }
-            results = results.push(card);
-        }
-        let mut content = column![
-            iced::widget::checkbox(self.preferences.auto_copy_single)
-                .label("Automatically copy a single result")
-                .on_toggle(Message::AutoCopyChanged)
-        ];
-        if let Some(warning) = &self.settings_warning {
-            content = content.push(text(warning));
-        }
-        if self
-            .copy_feedback
-            .is_some_and(|(session, _)| session.0 == self.state.session)
-        {
-            content = content.push(text("Copied to clipboard."));
-        }
-        if self.camera_mode {
-            content = content.push(
-                row![
-                    iced::widget::pick_list(
-                        self.camera_devices.as_slice(),
-                        self.selected_camera.as_ref(),
-                        Message::SelectCamera
-                    )
-                    .placeholder("Select camera"),
-                    button("Stop camera").on_press(Message::StopCamera)
-                ]
-                .spacing(8),
-            );
-            if let Some(handle) = &self.camera_preview {
-                content = content.push(
-                    iced::widget::image(handle.clone())
-                        .height(300)
-                        .width(iced::Length::Fill)
-                        .content_fit(iced::ContentFit::Contain),
-                );
-            }
-        }
-        if let Some(image) = &self.screenshot {
-            content = content.push(
-                row![
-                    button("Scan full image").on_press(Message::ScanFull),
-                    button("Select region").on_press(Message::SelectRegion)
-                ]
-                .spacing(8),
-            );
-            if self.selecting {
-                content = content.push(text("Drag a rectangle to scan. Escape cancels selection."));
-            }
-            content = content.push(
-                iced::widget::canvas(crate::capture::preview::Preview {
-                    handle: image.handle.clone(),
-                    size: (image.image.width(), image.image.height()),
-                    session: crate::jobs::JobId(self.state.session),
-                    selecting: self.selecting,
-                    epoch: self.crop_epoch,
-                })
-                .width(iced::Length::Fill)
-                .height(300),
-            );
-        }
-        container(
-            column![
-                text("QR Scanner").size(28),
-                text("Scan QR codes locally from your screen or camera."),
-                row![
-                    button("Scan screen").on_press(Message::UserCommand(Command::ScanScreen)),
-                    button("Scan camera").on_press(Message::UserCommand(Command::ScanCamera)),
-                    button("Desktop capture…")
-                        .on_press(Message::DesktopCapture)
-                        .style(button::text)
-                ]
-                .spacing(8),
-                text(status),
-                content,
-                scrollable(results).height(iced::Length::Fill),
-                button("Quit").on_press(Message::UserCommand(Command::Quit))
-            ]
-            .spacing(12),
-        )
-        .padding(24)
-        .into()
+    fn view(&self, id: window::Id) -> Element<'_, Message> {
+        view::view(self, id)
     }
     fn subscription(&self) -> Subscription<Message> {
         let primary = self.primary.clone();
@@ -718,17 +665,15 @@ impl App {
             Subscription::none()
         };
         Subscription::batch([
+            Subscription::run(appearance::events),
             camera_subscription,
+            window::resize_events().map(|(_, size)| Message::Resized(size.width)),
             window::close_events().map(Message::WindowClosed),
-            iced::event::listen_with(|event, _, _| {
-                matches!(
-                    event,
-                    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                        key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
-                        ..
-                    })
-                )
-                .then_some(Message::CancelCrop)
+            iced::event::listen_with(|event, status, _| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key, modifiers, ..
+                }) => focus::key_message(&key, modifiers.shift(), status),
+                _ => None,
             }),
             Subscription::run_with(DecoderSource(self.decoder.clone()), decode_events),
             Subscription::run_with(PrimarySource(primary), external_events),
@@ -849,548 +794,4 @@ fn decode_events(source: &DecoderSource) -> impl iced::futures::Stream<Item = Me
 }
 
 #[cfg(test)]
-mod capture_tests {
-    use super::*;
-    pub(super) fn app() -> App {
-        App {
-            state: Default::default(),
-            preferences: Default::default(),
-            preferences_loaded: false,
-            preference_path: None,
-            preference_revision: 0,
-            saving: None,
-            settings_warning: None,
-            auto_copy: Default::default(),
-            copy_feedback: None,
-            result_actions: Default::default(),
-            action_token: 0,
-            primary: Arc::new(Mutex::new(None)),
-            decoder: Arc::new(crate::jobs::Decoder::new()),
-            screenshot: None,
-            camera_preview: None,
-            camera: None,
-            retiring_cameras: Vec::new(),
-            camera_devices: Vec::new(),
-            selected_camera: None,
-            camera_mode: false,
-            selecting: false,
-            crop_epoch: 0,
-            pending_capture: None,
-            capture_mode: crate::capture::CaptureMode::Quick,
-            temporary_closes: Default::default(),
-        }
-    }
-    #[test]
-    fn reset_releases_capture_and_rejects_late_response() {
-        let mut app = app();
-        let old = app.state.begin_session();
-        let image = Arc::new(crate::capture::Prepared::new(
-            image::DynamicImage::new_rgb8(2, 2),
-        ));
-        app.screenshot = Some(image.clone());
-        app.selecting = true;
-        let id = app.reset_source();
-        assert_ne!(id, old);
-        assert!(app.screenshot.is_none());
-        assert!(!app.selecting);
-        let _ = app.update(Message::CaptureFinished(old, Ok(Some(image))));
-        assert!(app.screenshot.is_none());
-        assert!(app.state.busy);
-    }
-    #[test]
-    fn camera_failure_cannot_be_overwritten_by_a_queued_decode() {
-        let mut app = app();
-        let id = app.state.begin_session();
-        let _ = app.update(Message::CameraOutcome(Arc::new(crate::camera::Outcome {
-            id,
-            event: crate::camera::Event::Error("unplugged".into()),
-        })));
-        let _ = app.update(Message::DecodeFinished(Arc::new(
-            crate::jobs::DecodeOutcome {
-                id,
-                result: Ok(vec![]),
-            },
-        )));
-        assert_eq!(app.state.error.as_deref(), Some("Camera failed: unplugged"));
-        assert!(!app.state.busy);
-    }
-    #[test]
-    fn camera_frames_after_close_or_stop_cannot_restore_preview() {
-        let mut app = app();
-        let window = window::Id::unique();
-        app.state.window_ids.push(window);
-        app.state.windows = 1;
-        app.state.host_available = true;
-        let old = app.state.begin_session();
-        let frame = Arc::new(crate::camera::Outcome {
-            id: old,
-            event: crate::camera::Event::Frame {
-                preview: Some(iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4])),
-                gray: Some(Arc::new(image::GrayImage::new(1, 1))),
-            },
-        });
-        let _ = app.update(Message::CameraOutcome(frame.clone()));
-        assert!(app.camera_preview.is_some());
-        let _ = app.update(Message::WindowClosed(window));
-        assert!(app.camera_preview.is_none());
-        let _ = app.update(Message::CameraOutcome(frame));
-        assert!(app.camera_preview.is_none());
-        assert!(!app.state.busy);
-    }
-    #[test]
-    fn close_releases_capture() {
-        let mut app = app();
-        app.state.host_available = true;
-        app.state.windows = 1;
-        let id = iced::window::Id::unique();
-        app.state.window_ids.push(id);
-        app.screenshot = Some(Arc::new(crate::capture::Prepared::new(
-            image::DynamicImage::new_rgb8(2, 2),
-        )));
-        let _ = app.update(Message::WindowClosed(id));
-        assert!(app.screenshot.is_none());
-        assert!(!app.state.busy);
-    }
-}
-
-#[cfg(test)]
-mod temporary_capture_tests {
-    use super::capture_tests::app;
-    use super::*;
-    #[test]
-    fn intentional_last_window_close_preserves_capture_session() {
-        let mut app = app();
-        let window = window::Id::unique();
-        app.state.window_ids.push(window);
-        app.state.windows = 1;
-        let _ = app.command(Command::ScanScreen);
-        let session = app.state.session;
-        assert!(app.temporary_closes.contains(&window));
-        assert!(app.state.window_ids.is_empty());
-        assert_eq!(app.state.windows, 0);
-        let _ = app.update(Message::WindowClosed(window));
-        assert_eq!(app.state.session, session);
-        assert!(app.state.busy);
-        assert!(app.temporary_closes.is_empty());
-        assert_eq!(app.pending_capture, Some(crate::jobs::JobId(session)));
-        let _ = app.update(Message::CaptureFinished(
-            crate::jobs::JobId(session),
-            Ok(None),
-        ));
-        assert!(!app.state.busy);
-        assert_eq!(app.state.window_ids.len(), 1);
-        assert!(app.pending_capture.is_none());
-    }
-    #[test]
-    fn waits_for_every_close_and_restores_after_failure() {
-        let mut app = app();
-        let first = window::Id::unique();
-        let second = window::Id::unique();
-        app.state.window_ids = vec![first, second];
-        app.state.windows = 2;
-        let _ = app.command(Command::ScanScreen);
-        let id = crate::jobs::JobId(app.state.session);
-        assert_eq!(app.update(Message::WindowClosed(first)).units(), 0);
-        assert_eq!(app.update(Message::TrayHostChanged(false)).units(), 0);
-        assert_eq!(app.command(Command::Show).units(), 0);
-        assert!(app.state.window_ids.is_empty());
-        assert!(app.update(Message::WindowClosed(second)).units() > 0);
-        assert_eq!(app.state.session, id.0);
-        let _ = app.update(Message::CaptureFinished(id, Err("denied".into())));
-        assert_eq!(app.state.error.as_deref(), Some("denied"));
-        assert!(!app.state.busy);
-        assert_eq!(app.state.window_ids.len(), 1);
-    }
-    #[test]
-    fn source_switch_during_temporary_close_ignores_old_completion() {
-        let mut app = app();
-        let window = window::Id::unique();
-        app.state.window_ids.push(window);
-        app.state.windows = 1;
-        let _ = app.command(Command::ScanScreen);
-        let old = crate::jobs::JobId(app.state.session);
-        let _ = app.command(Command::ScanCamera);
-        let session = app.state.session;
-        let _ = app.update(Message::WindowClosed(window));
-        assert_eq!(app.state.session, session);
-        assert_eq!(app.state.window_ids.len(), 1);
-        let _ = app.update(Message::CaptureFinished(old, Err("old failure".into())));
-        assert_ne!(app.state.error.as_deref(), Some("old failure"));
-    }
-}
-
-#[cfg(test)]
-mod final_review_tests {
-    use super::capture_tests::app;
-    use super::*;
-    #[tokio::test]
-    async fn captured_image_automatically_schedules_full_decode() {
-        use iced::futures::StreamExt;
-        let mut app = app();
-        let id = app.state.begin_session();
-        let image = Arc::new(crate::capture::Prepared::new(
-            image::DynamicImage::new_rgb8(7, 9),
-        ));
-        let task = app.update(Message::CaptureFinished(id, Ok(Some(image.clone()))));
-        assert!(Arc::ptr_eq(app.screenshot.as_ref().unwrap(), &image));
-        let mut stream = iced_runtime::task::into_stream(task).unwrap();
-        let mut scheduled = false;
-        while let Some(action) = stream.next().await {
-            if let iced_runtime::Action::Output(message @ Message::DecodeRequested(_, _)) = action {
-                if let Message::DecodeRequested(_, gray) = &message {
-                    assert_eq!(gray.dimensions(), (7, 9));
-                }
-                let _ = app.update(message);
-                scheduled = true;
-            }
-        }
-        assert!(
-            scheduled,
-            "capture must schedule decoding without another click"
-        );
-        let outcome = app.decoder.subscribe().recv().await.unwrap();
-        let _ = app.update(Message::DecodeFinished(outcome));
-        assert!(app.state.scanned);
-        assert!(!app.state.busy);
-    }
-    #[test]
-    fn stop_retains_results_and_rejects_stale_camera_and_decode_work() {
-        let mut app = app();
-        let id = app.state.begin_session();
-        app.camera_mode = true;
-        app.camera_preview = Some(iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]));
-        let _ = app.update(Message::DecodeFinished(Arc::new(
-            crate::jobs::DecodeOutcome {
-                id,
-                result: Ok(vec![crate::results::QrResult::from_payload(
-                    b"keep".to_vec(),
-                )]),
-            },
-        )));
-        let _ = app.update(Message::StopCamera);
-        assert_eq!(
-            app.state.results.len(),
-            1,
-            "Stop must retain scanned results"
-        );
-        assert!(app.state.scanned);
-        assert!(app.camera.is_none());
-        assert!(app.camera_preview.is_none());
-        assert!(!app.camera_mode);
-        let _ = app.update(Message::CameraOutcome(Arc::new(crate::camera::Outcome {
-            id,
-            event: crate::camera::Event::Frame {
-                preview: Some(iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4])),
-                gray: Some(Arc::new(image::GrayImage::new(1, 1))),
-            },
-        })));
-        let _ = app.update(Message::DecodeRequested(
-            id,
-            Arc::new(image::GrayImage::new(1, 1)),
-        ));
-        let _ = app.update(Message::DecodeFinished(Arc::new(
-            crate::jobs::DecodeOutcome {
-                id,
-                result: Ok(vec![crate::results::QrResult::from_payload(
-                    b"stale".to_vec(),
-                )]),
-            },
-        )));
-        assert_eq!(app.state.results.len(), 1);
-        assert_eq!(app.state.results[0].payload, b"keep");
-        assert!(app.camera_preview.is_none());
-        assert!(!app.state.busy);
-        let _ = app.command(Command::ScanCamera);
-        assert!(app.state.results.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod cancellation_feedback_tests {
-    use super::*;
-    #[test]
-    fn cancelled_capture_has_distinct_status_cleared_by_next_operation() {
-        let mut app = super::capture_tests::app();
-        let id = app.state.begin_session();
-        let _ = app.update(Message::CaptureFinished(id, Ok(None)));
-        assert_eq!(app.status(), "Capture cancelled.");
-        assert!(!app.state.busy);
-        assert!(!app.state.scanned);
-        assert!(app.state.error.is_none());
-        let _ = app.command(Command::ScanCamera);
-        assert_ne!(app.status(), "Capture cancelled.");
-    }
-}
-
-#[cfg(test)]
-mod quick_capture_tests {
-    use super::capture_tests::app;
-    use super::*;
-    #[test]
-    fn explicit_fallback_survives_window_close_then_next_scan_returns_to_quick() {
-        let mut app = app();
-        let window = window::Id::unique();
-        app.state.window_ids.push(window);
-        app.state.windows = 1;
-        let _ = app.update(Message::DesktopCapture);
-        let id = app.pending_capture.unwrap();
-        assert_eq!(app.capture_mode, crate::capture::CaptureMode::Interactive);
-        assert!(app.temporary_closes.contains(&window));
-        assert!(app.update(Message::WindowClosed(window)).units() > 0);
-        assert_eq!(app.capture_mode, crate::capture::CaptureMode::Interactive);
-        let _ = app.update(Message::CaptureFinished(
-            id,
-            Err("Permission denied".into()),
-        ));
-        assert_eq!(app.state.error.as_deref(), Some("Permission denied"));
-        assert!(app.pending_capture.is_none());
-        assert_eq!(app.state.window_ids.len(), 1);
-        let _ = app.command(Command::ScanScreen);
-        assert_eq!(app.capture_mode, crate::capture::CaptureMode::Quick);
-    }
-}
-
-#[cfg(test)]
-mod preference_tests {
-    use super::*;
-    #[test]
-    fn toggle_during_load_wins_and_queued_saves_coalesce() {
-        let mut app = super::capture_tests::app();
-        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        assert!(
-            app.update(Message::PreferencesLoaded(
-                crate::settings::LoadedPreferences {
-                    preferences: Default::default(),
-                    path: Some(path),
-                    warning: None
-                }
-            ))
-            .units()
-                > 0
-        );
-        assert!(app.preferences.auto_copy_single);
-        let first = app.saving.unwrap();
-        assert_eq!(app.update(Message::AutoCopyChanged(false)).units(), 0);
-        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
-        assert_eq!(app.update(Message::AutoCopyChanged(false)).units(), 0);
-        assert!(app.update(Message::PreferencesSaved(first, Ok(()))).units() > 0);
-        assert_eq!(app.saving, Some(app.preference_revision));
-        assert!(!app.preferences.auto_copy_single);
-    }
-    #[test]
-    fn settings_warning_preserves_results_and_scan_error() {
-        let mut app = super::capture_tests::app();
-        app.state
-            .results
-            .push(crate::results::QrResult::from_payload(b"keep".to_vec()));
-        app.state.error = Some("scan error".into());
-        let _ = app.update(Message::PreferencesLoaded(
-            crate::settings::LoadedPreferences {
-                preferences: Default::default(),
-                path: None,
-                warning: Some("settings error".into()),
-            },
-        ));
-        assert_eq!(app.settings_warning.as_deref(), Some("settings error"));
-        assert_eq!(app.state.error.as_deref(), Some("scan error"));
-        assert_eq!(app.state.results.len(), 1);
-    }
-    #[tokio::test]
-    async fn accepted_single_requests_exact_copy_and_stale_or_duplicate_requests_none() {
-        use iced::futures::StreamExt;
-        let mut app = super::capture_tests::app();
-        app.preferences.auto_copy_single = true;
-        let id = app.state.begin_session();
-        let outcome = Arc::new(crate::jobs::DecodeOutcome {
-            id,
-            result: Ok(vec![
-                crate::results::QrResult::from_payload(b"WIFI:T:WPA;S:home;P:secret;;".to_vec()),
-                crate::results::QrResult::from_payload(b"WIFI:T:WPA;S:home;P:secret;;".to_vec()),
-            ]),
-        });
-        let task = app.update(Message::DecodeFinished(outcome.clone()));
-        let mut stream = iced_runtime::task::into_stream(task).unwrap();
-        let mut copied = false;
-        while let Some(action) = stream.next().await {
-            if let iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
-                contents,
-                ..
-            }) = action
-            {
-                assert_eq!(contents, "WIFI:T:WPA;S:home;P:secret;;");
-                copied = true;
-            }
-        }
-        assert!(copied);
-        assert_eq!(
-            app.update(Message::DecodeFinished(outcome.clone())).units(),
-            0
-        );
-        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
-        app.state.begin_session();
-        assert_eq!(app.update(Message::DecodeFinished(outcome)).units(), 0);
-    }
-}
-
-#[cfg(test)]
-mod persistence_action_tests {
-    use super::*;
-    use iced::futures::StreamExt;
-    async fn complete(task: Task<Message>) -> Message {
-        let mut stream = iced_runtime::task::into_stream(task).unwrap();
-        while let Some(action) = stream.next().await {
-            if let iced_runtime::Action::Output(message) = action {
-                return message;
-            }
-        }
-        panic!("save must report completion")
-    }
-    #[tokio::test]
-    async fn serialized_writes_retain_last_toggle_on_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config/settings.json");
-        let mut app = super::capture_tests::app();
-        let _ = app.update(Message::PreferencesLoaded(
-            crate::settings::LoadedPreferences {
-                preferences: Default::default(),
-                path: Some(path.clone()),
-                warning: None,
-            },
-        ));
-        let first = app.update(Message::AutoCopyChanged(true));
-        let _ = app.update(Message::AutoCopyChanged(false));
-        let _ = app.update(Message::AutoCopyChanged(true));
-        let _ = app.update(Message::AutoCopyChanged(false));
-        let message = complete(first).await;
-        let last = app.update(message);
-        let message = complete(last).await;
-        assert_eq!(app.update(message).units(), 0);
-        let saved: crate::settings::Preferences =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert!(!saved.auto_copy_single);
-        assert!(app.saving.is_none());
-    }
-    #[tokio::test]
-    async fn manual_copy_uses_exact_binary_text_and_multicode_never_autocopies() {
-        let mut app = super::capture_tests::app();
-        app.preferences.auto_copy_single = true;
-        let id = app.state.begin_session();
-        let binary = crate::results::QrResult::from_payload(vec![255, 0]);
-        let task = app.update(Message::DecodeFinished(Arc::new(
-            crate::jobs::DecodeOutcome {
-                id,
-                result: Ok(vec![
-                    binary.clone(),
-                    crate::results::QrResult::from_payload(b"other".to_vec()),
-                ]),
-            },
-        )));
-        assert_eq!(task.units(), 0);
-        let mut stream =
-            iced_runtime::task::into_stream(app.update(Message::CopyResult(0))).unwrap();
-        let mut text = None;
-        while let Some(action) = stream.next().await {
-            if let iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
-                contents,
-                ..
-            }) = action
-            {
-                text = Some(contents);
-            }
-        }
-        assert_eq!(text, Some(binary.display_text));
-        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
-    }
-    #[test]
-    fn save_failure_does_not_change_results_or_scan_error() {
-        let mut app = super::capture_tests::app();
-        app.state
-            .results
-            .push(crate::results::QrResult::from_payload(b"keep".to_vec()));
-        app.state.error = Some("decode failure".into());
-        app.saving = Some(3);
-        app.preference_revision = 3;
-        let _ = app.update(Message::PreferencesSaved(3, Err("disk full".into())));
-        assert!(app.settings_warning.is_some());
-        assert_eq!(app.state.results[0].payload, b"keep");
-        assert_eq!(app.state.error.as_deref(), Some("decode failure"));
-    }
-}
-
-#[cfg(test)]
-mod explicit_action_tests {
-    use super::*;
-    #[test]
-    fn click_only_duplicate_pending_and_stale_outcomes() {
-        let mut app = super::capture_tests::app();
-        let id = app.state.begin_session();
-        let _ = app.update(Message::DecodeFinished(Arc::new(
-            crate::jobs::DecodeOutcome {
-                id,
-                result: Ok(vec![crate::results::QrResult::from_payload(
-                    b"https://example.org".to_vec(),
-                )]),
-            },
-        )));
-        assert!(app.result_actions.is_empty());
-        let _ = app.update(Message::CopyResult(0));
-        assert!(app.result_actions.is_empty());
-        assert!(app.update(Message::ActivateResult(0)).units() > 0);
-        let first = app.result_actions[&0].token;
-        assert_eq!(app.update(Message::ActivateResult(0)).units(), 0);
-        let key = crate::actions::ActionKey {
-            session: id,
-            result_index: 0,
-        };
-        app.state.error = Some("scan error".into());
-        app.settings_warning = Some("settings warning".into());
-        let _ = app.update(Message::ActionFinished(
-            key,
-            first,
-            Err(crate::actions::ActionError::Authorization),
-        ));
-        assert!(matches!(
-            app.result_actions[&0].status,
-            crate::actions::ActionStatus::Failed(_)
-        ));
-        assert_eq!(app.state.results.len(), 1);
-        assert!(app.update(Message::CopyResult(0)).units() > 0);
-        assert!(app.update(Message::ActivateResult(0)).units() > 0);
-        let next = app.result_actions[&0].token;
-        let _ = app.update(Message::ActionFinished(key, first, Ok(())));
-        assert_eq!(app.result_actions[&0].token, next);
-        assert!(matches!(
-            app.result_actions[&0].status,
-            crate::actions::ActionStatus::Pending
-        ));
-        assert_eq!(app.state.error.as_deref(), Some("scan error"));
-        assert_eq!(app.settings_warning.as_deref(), Some("settings warning"));
-        app.reset_source();
-        let _ = app.update(Message::ActionFinished(key, next, Ok(())));
-        assert!(app.result_actions.is_empty());
-    }
-    #[test]
-    fn all_typed_actions_require_explicit_click_and_plain_text_is_inert() {
-        for payload in [
-            "https://example.org",
-            "tel:+123456",
-            "WIFI:T:nopass;S:home;;",
-        ] {
-            let mut app = super::capture_tests::app();
-            app.state
-                .results
-                .push(crate::results::QrResult::from_payload(
-                    payload.as_bytes().to_vec(),
-                ));
-            assert!(app.result_actions.is_empty());
-            assert!(app.update(Message::ActivateResult(0)).units() > 0);
-        }
-        let mut app = super::capture_tests::app();
-        app.state
-            .results
-            .push(crate::results::QrResult::from_payload(b"123456".to_vec()));
-        assert_eq!(app.update(Message::ActivateResult(0)).units(), 0);
-    }
-}
+mod tests;
