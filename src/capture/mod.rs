@@ -40,6 +40,7 @@ pub enum CaptureMode {
     #[default]
     Quick,
     Interactive,
+    Region,
 }
 
 fn screenshot_options(
@@ -48,9 +49,9 @@ fn screenshot_options(
 ) -> ashpd::desktop::screenshot::ScreenshotOptions {
     use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotOptions};
     let options = ScreenshotOptions::default()
-        .set_interactive(mode == CaptureMode::Interactive)
+        .set_interactive(mode != CaptureMode::Quick)
         .set_modal(false);
-    if mode == CaptureMode::Interactive && area_available {
+    if mode != CaptureMode::Quick && area_available {
         options.set_target(AvailableTargets::Area)
     } else {
         options
@@ -60,13 +61,24 @@ fn screenshot_options(
 /// Request a screenshot using the desktop portal.
 pub async fn screenshot(mode: CaptureMode) -> anyhow::Result<CaptureOutcome> {
     use ashpd::desktop::screenshot::{AvailableTargets, ScreenshotProxy};
+    if mode == CaptureMode::Region
+        && std::env::var("XDG_CURRENT_DESKTOP")
+            .is_ok_and(|v| v.split(':').any(|part| part.eq_ignore_ascii_case("KDE")))
+    {
+        return spectacle_region().await;
+    }
     let proxy = ScreenshotProxy::new().await?;
-    let area_available = mode == CaptureMode::Interactive
+    let area_available = mode != CaptureMode::Quick
         && proxy.version() >= 3
         && proxy
             .available_targets()
             .await
             .is_ok_and(|targets| targets.contains(AvailableTargets::Area));
+    if mode == CaptureMode::Region && !area_available {
+        anyhow::bail!(
+            "Direct region selection is unavailable on this desktop. Use Scan screen or Desktop capture instead."
+        );
+    }
     let options = screenshot_options(mode, area_available);
     let response = match proxy.screenshot(None, options).await {
         Ok(request) => request.response(),
@@ -78,6 +90,50 @@ pub async fn screenshot(mode: CaptureMode) -> anyhow::Result<CaptureOutcome> {
         Err(error) => Err(error.into()),
     };
     tokio::task::spawn_blocking(move || load_response(result, load_local)).await?
+}
+/// Spectacle owns the native Wayland overlay; its image lives only in a private
+/// temporary directory until decoding, never in the user's screenshot collection.
+async fn spectacle_region() -> anyhow::Result<CaptureOutcome> {
+    spectacle_region_using(std::path::Path::new("spectacle")).await
+}
+async fn spectacle_region_using(executable: &std::path::Path) -> anyhow::Result<CaptureOutcome> {
+    let directory = tempfile::Builder::new().prefix("qr-region-").tempdir()?;
+    let path = directory.path().join("region.png");
+    let mut child = tokio::process::Command::new(executable)
+        .args([
+            "--background",
+            "--nonotify",
+            "--region",
+            "--release-capture",
+            "--output",
+        ])
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| {
+            anyhow::anyhow!("Spectacle is required for native region selection on KDE.")
+        })?;
+    let status = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait())
+        .await
+        .map_err(|_| anyhow::anyhow!("Region selection timed out."))??;
+    if !path.exists() {
+        if status.success() || status.code() == Some(1) {
+            return Ok(CaptureOutcome::Cancelled);
+        }
+        anyhow::bail!("Region capture failed.");
+    }
+    if !status.success() {
+        anyhow::bail!("Region capture failed.");
+    }
+    tokio::task::spawn_blocking(move || {
+        let image = load_local(&path)?;
+        drop(directory);
+        Ok(CaptureOutcome::Captured(image))
+    })
+    .await?
 }
 fn load_local(path: &std::path::Path) -> anyhow::Result<image::DynamicImage> {
     let file = std::fs::File::open(path)?;
@@ -166,5 +222,49 @@ mod capture_mode_tests {
             u32::try_from(newer["target"].try_clone().unwrap()).unwrap(),
             4
         );
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn region_capture_uses_release_selector_private_file_and_removes_it() {
+        let fixture = tempfile::tempdir().unwrap();
+        let image = fixture.path().join("fixture.png");
+        image::DynamicImage::new_rgb8(2, 3).save(&image).unwrap();
+        let script = fixture.path().join("spectacle");
+        let receipt = fixture.path().join("arguments");
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nwhile [ \"$1\" != --output ]; do shift; done\nshift\ncp '{}' \"$1\"\n", receipt.display(), image.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let outcome = spectacle_region_using(&script).await.unwrap();
+        let CaptureOutcome::Captured(image) = outcome else {
+            panic!("not captured");
+        };
+        assert_eq!((image.width(), image.height()), (2, 3));
+        let arguments = std::fs::read_to_string(receipt).unwrap();
+        let args: Vec<_> = arguments.lines().collect();
+        assert_eq!(
+            &args[..5],
+            &[
+                "--background",
+                "--nonotify",
+                "--region",
+                "--release-capture",
+                "--output"
+            ]
+        );
+        assert!(
+            !std::path::Path::new(args[5]).parent().unwrap().exists(),
+            "captured file must be removed after loading"
+        );
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        assert!(matches!(
+            spectacle_region_using(&script).await.unwrap(),
+            CaptureOutcome::Cancelled
+        ));
+        std::fs::write(&script, "#!/bin/sh\nexit 2\n").unwrap();
+        assert!(spectacle_region_using(&script).await.is_err());
     }
 }

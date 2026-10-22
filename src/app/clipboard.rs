@@ -20,6 +20,54 @@ impl AutoCopyPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ClipboardUnavailable;
+impl std::fmt::Display for ClipboardUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Windowless clipboard unavailable.")
+    }
+}
+impl std::error::Error for ClipboardUnavailable {}
+/// Wayland data-control clipboard ownership does not require a visible window.
+/// Payload goes over stdin, never in process arguments or logs.
+pub async fn write_windowless(text: String) -> Result<(), ClipboardUnavailable> {
+    write_using(std::path::Path::new("wl-copy"), text).await
+}
+async fn write_using(
+    executable: &std::path::Path,
+    text: String,
+) -> Result<(), ClipboardUnavailable> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new(executable)
+        .args(["--type", "text/plain;charset=utf-8"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| ClipboardUnavailable)?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut stdin = child.stdin.take().ok_or(ClipboardUnavailable)?;
+        stdin
+            .write_all(text.as_bytes())
+            .await
+            .map_err(|_| ClipboardUnavailable)?;
+        drop(stdin);
+        if child
+            .wait()
+            .await
+            .map_err(|_| ClipboardUnavailable)?
+            .success()
+        {
+            Ok(())
+        } else {
+            Err(ClipboardUnavailable)
+        }
+    })
+    .await
+    .map_err(|_| ClipboardUnavailable)?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,5 +108,46 @@ mod tests {
                 Some(result.display_text)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod windowless_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[tokio::test]
+    async fn windowless_copy_uses_stdin_and_reports_failure_without_user_clipboard() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("wl-copy");
+        let copied = directory.path().join("payload");
+        let args = directory.path().join("args");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\n",
+                args.display(),
+                copied.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        write_using(&executable, "WIFI:P:secret;\\n☃".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(copied).unwrap(),
+            "WIFI:P:secret;\\n☃"
+        );
+        assert_eq!(
+            std::fs::read_to_string(args).unwrap(),
+            "--type\ntext/plain;charset=utf-8\n"
+        );
+        std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+        assert!(write_using(&executable, "text".into()).await.is_err());
+        assert!(
+            write_using(&directory.path().join("missing"), "text".into())
+                .await
+                .is_err()
+        );
     }
 }

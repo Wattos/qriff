@@ -10,7 +10,7 @@ use crate::{
 };
 use iced::{
     Element, Length,
-    widget::{button, checkbox, column, container, row, scrollable, text},
+    widget::{button, checkbox, column, container, row, scrollable, text, text_editor},
 };
 
 pub(super) fn wide(width: f32) -> bool {
@@ -45,13 +45,56 @@ fn auto_copy(app: &App, target: Target) -> Element<'_, Message> {
 /// Display text deliberately excludes encoded Wi-Fi credentials, including malformed Wi-Fi.
 pub(super) fn payload(result: &crate::results::QrResult, reveal: bool) -> String {
     match &result.content {
-        QrContent::Wifi(network) => network.ssid.clone(),
+        QrContent::Wifi(network) => {
+            if reveal && let Some(password) = &network.password {
+                format!("{}\nPassword: {password}", network.ssid)
+            } else {
+                network.ssid.clone()
+            }
+        }
         QrContent::Phone { number, .. } => number.clone(),
         QrContent::Invalid {
             kind: ContentKind::Wifi,
             ..
         } if !reveal => "Encoded Wi-Fi details hidden".into(),
         _ => result.display_text.clone(),
+    }
+}
+fn selectable_payload<'a>(
+    app: &'a App,
+    index: usize,
+    result: &'a crate::results::QrResult,
+    revealed: bool,
+) -> Element<'a, Message> {
+    if let Some(content) = app.result_texts.get(&index) {
+        let session = app.result_session();
+        text_editor(content)
+            .key_binding(|press| {
+                if matches!(
+                    press.key,
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab)
+                ) {
+                    Some(text_editor::Binding::Unfocus)
+                } else {
+                    text_editor::Binding::from_key_press(press)
+                }
+            })
+            .on_action(move |action| Message::SelectText(session, index, action))
+            .height(Length::Shrink)
+            .padding(6)
+            .size(16)
+            .style(move |theme, status| {
+                let mut style = text_editor::default(theme, status);
+                style.background = iced::Background::Color(iced::Color::TRANSPARENT);
+                style.border.width = 0.0;
+                if matches!(result.content, QrContent::Url(_)) {
+                    style.value = style::accent(theme).color.unwrap_or(style.value);
+                }
+                style
+            })
+            .into()
+    } else {
+        text(payload(result, revealed)).size(16).into()
     }
 }
 fn card(app: &App, index: usize) -> Element<'_, Message> {
@@ -82,17 +125,7 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center),
-        text(payload(result, revealed))
-            .size(if matches!(result.content, QrContent::Phone { .. }) {
-                21
-            } else {
-                16
-            })
-            .style(if matches!(result.content, QrContent::Url(_)) {
-                style::accent
-            } else {
-                iced::widget::text::default
-            })
+        selectable_payload(app, index, result, revealed)
     ]
     .spacing(10);
     if let QrContent::Wifi(network) = &result.content {
@@ -113,17 +146,14 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
             ))
             .size(12),
         );
-        if let Some(password) = &network.password {
+        if network.password.is_some() {
             body = body.push(
                 row![
-                    text(format!(
-                        "Password   {}",
-                        if revealed {
-                            password.as_str()
-                        } else {
-                            "••••••••••••"
-                        }
-                    ))
+                    text(if revealed {
+                        "Password shown above"
+                    } else {
+                        "Password   ••••••••••••"
+                    })
                     .size(12)
                     .width(Length::Fill),
                     focus::anchor(

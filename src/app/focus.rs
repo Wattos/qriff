@@ -63,7 +63,7 @@ pub(super) fn targets(app: &App) -> Vec<Target> {
         }
         if result.action().is_some()
             && !app.result_actions.get(&i).is_some_and(|s| {
-                s.key.session.0 == app.state.session
+                s.key.session == app.result_session()
                     && matches!(s.status, crate::actions::ActionStatus::Pending)
             })
         {

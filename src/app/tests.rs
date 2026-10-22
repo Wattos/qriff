@@ -5,6 +5,10 @@ mod capture_tests {
     pub(super) fn app() -> App {
         App {
             state: Default::default(),
+            windowless: false,
+            clipboard_failed: false,
+            result_texts: Default::default(),
+            desktop: tokio::sync::watch::channel(Default::default()).0,
             focus: None,
             focus_ticket: 0,
             focus_ready: false,
@@ -943,4 +947,178 @@ fn synchronous_settings_warning_invalidates_confirmed_viewport() {
     assert!(app.settings_warning.is_some());
     assert!(!app.focus_ready);
     assert_ne!(app.focus_ticket, confirmed);
+}
+
+#[test]
+fn tray_screen_capture_never_opens_results_window() {
+    let mut app = capture_tests::app();
+    app.state.host_available = true;
+    let _ = app.update(Message::InstanceCommand(Command::ScanScreen));
+    let id = crate::jobs::JobId(app.state.session);
+    let image = Arc::new(crate::capture::Prepared::new(
+        image::DynamicImage::new_rgb8(2, 2),
+    ));
+    let _ = app.update(Message::CaptureFinished(id, Ok(Some(image))));
+    assert!(
+        app.state.window_ids.is_empty(),
+        "tray capture must remain windowless"
+    );
+}
+
+#[test]
+fn selectable_payload_is_read_only_and_hides_secrets_again() {
+    use iced::widget::text_editor::{Action, Edit};
+    let mut app = capture_tests::app();
+    let id = app.reset_source();
+    let result =
+        crate::results::QrResult::from_payload(b"WIFI:T:WPA;S:My network;P:verysecret;;".to_vec());
+    let _ = app.update(Message::DecodeFinished(Arc::new(
+        crate::jobs::DecodeOutcome {
+            id,
+            result: Ok(vec![result]),
+        },
+    )));
+    assert_eq!(app.result_texts[&0].text(), "My network");
+    let _ = app.update(Message::SelectText(id, 0, Action::SelectAll));
+    assert_eq!(
+        app.result_texts[&0].selection().as_deref(),
+        Some("My network")
+    );
+    let _ = app.update(Message::SelectText(id, 0, Action::Edit(Edit::Insert('x'))));
+    assert_eq!(app.result_texts[&0].text(), "My network");
+    let _ = app.update(Message::RevealPassword(0));
+    assert!(app.result_texts[&0].text().contains("verysecret"));
+    let _ = app.update(Message::RevealPassword(0));
+    assert!(!app.result_texts[&0].text().contains("verysecret"));
+    assert!(app.result_texts[&0].selection().is_none());
+    let old = id;
+    let id = app.reset_source();
+    let result = crate::results::QrResult::from_payload(b"new result".to_vec());
+    let _ = app.update(Message::DecodeFinished(Arc::new(
+        crate::jobs::DecodeOutcome {
+            id,
+            result: Ok(vec![result]),
+        },
+    )));
+    let _ = app.update(Message::SelectText(old, 0, Action::SelectAll));
+    assert!(app.result_texts[&0].selection().is_none());
+}
+
+#[test]
+fn tray_results_notify_and_reject_old_buttons_without_os_actions() {
+    let mut app = capture_tests::app();
+    app.state.host_available = true;
+    let _ = app.update(Message::InstanceCommand(Command::ScanScreen));
+    let capture = crate::jobs::JobId(app.state.session);
+    let image = Arc::new(crate::capture::Prepared::new(
+        image::DynamicImage::new_rgb8(2, 2),
+    ));
+    drop(app.update(Message::CaptureFinished(capture, Ok(Some(image)))));
+    let id = crate::jobs::JobId(app.state.session);
+    let _ = app.update(Message::DecodeFinished(Arc::new(
+        crate::jobs::DecodeOutcome {
+            id,
+            result: Ok(vec![crate::results::QrResult::from_payload(
+                b"https://example.org".to_vec(),
+            )]),
+        },
+    )));
+    let snapshot = app.desktop.borrow().clone();
+    assert_eq!(snapshot.notification.unwrap().title, "QR code found");
+    assert_eq!(snapshot.results[0].action, Some("Open URL"));
+    assert!(app.state.window_ids.is_empty());
+    let _ = app.update(Message::InstanceCommand(Command::ScanScreen));
+    let rejected = app.update(Message::InstanceCommand(Command::ActivateResult(id.0, 0)));
+    assert_eq!(rejected.units(), 0);
+    assert!(app.result_actions.is_empty());
+    let _ = app.update(Message::CaptureFinished(
+        crate::jobs::JobId(app.state.session),
+        Err("capture error".into()),
+    ));
+    assert!(app.state.window_ids.is_empty());
+    assert_eq!(
+        app.desktop.borrow().notification.as_ref().unwrap().title,
+        "QR scan failed"
+    );
+}
+
+#[test]
+fn camera_keeps_window_and_tray_region_uses_native_capture() {
+    let mut app = capture_tests::app();
+    let task = app.update(Message::InstanceCommand(Command::ScanCamera));
+    drop(task); // enumeration never polled
+    assert!(!app.windowless);
+    assert_eq!(app.state.window_ids.len(), 1);
+    let task = app.update(Message::InstanceCommand(Command::ScanRegion));
+    drop(task);
+    assert!(app.windowless);
+    assert_eq!(app.capture_mode, crate::capture::CaptureMode::Region);
+    assert!(app.state.window_ids.is_empty());
+    let session = app.state.session;
+    drop(app.update(Message::InstanceCommand(Command::ScanRegion)));
+    assert_eq!(
+        app.state.session, session,
+        "duplicate clicks must not spawn another selector"
+    );
+}
+
+#[test]
+fn multiple_action_failures_retain_desktop_feedback() {
+    let mut app = capture_tests::app();
+    let id = app.reset_source();
+    let _ = app.update(Message::DecodeFinished(Arc::new(
+        crate::jobs::DecodeOutcome {
+            id,
+            result: Ok(vec![
+                crate::results::QrResult::from_payload(b"https://example.org".to_vec()),
+                crate::results::QrResult::from_payload(b"tel:+41123456789".to_vec()),
+            ]),
+        },
+    )));
+    for index in 0..2 {
+        drop(app.update(Message::ActivateResult(index)));
+        let action = &app.result_actions[&index];
+        let _ = app.update(Message::ActionFinished(
+            action.key,
+            action.token,
+            Err(if index == 0 {
+                crate::actions::ActionError::Authorization
+            } else {
+                crate::actions::ActionError::NoPhoneHandler
+            }),
+        ));
+    }
+    let snapshot = app.desktop.borrow();
+    assert_eq!(snapshot.results.len(), 2);
+    assert_eq!(
+        snapshot.results[0].feedback.as_deref(),
+        Some("Permission to connect was denied. Try network settings.")
+    );
+    assert_eq!(
+        snapshot.results[1].feedback.as_deref(),
+        Some("No telephone app is configured. Copy the number to use it elsewhere.")
+    );
+}
+
+#[test]
+fn malformed_wifi_hidden_buffer_rejects_queued_selection() {
+    use iced::widget::text_editor::Action;
+    let mut app = capture_tests::app();
+    let id = app.reset_source();
+    let _ = app.update(Message::DecodeFinished(Arc::new(
+        crate::jobs::DecodeOutcome {
+            id,
+            result: Ok(vec![crate::results::QrResult::from_payload(
+                b"WIFI:T:WPA;P:secret;;".to_vec(),
+            )]),
+        },
+    )));
+    assert!(!app.result_texts[&0].text().contains("secret"));
+    let _ = app.update(Message::RevealPassword(0));
+    assert!(app.result_texts[&0].text().contains("secret"));
+    let _ = app.update(Message::SelectText(id, 0, Action::SelectAll));
+    let _ = app.update(Message::RevealPassword(0));
+    let _ = app.update(Message::SelectText(id, 0, Action::SelectAll));
+    assert!(!app.result_texts[&0].text().contains("secret"));
+    assert!(app.result_texts[&0].selection().is_none());
 }

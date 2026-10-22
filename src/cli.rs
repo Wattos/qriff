@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 pub enum Command {
     Show,
     ScanScreen,
+    ScanRegion,
+    CopyResult(u64, usize),
+    ActivateResult(u64, usize),
     ScanCamera,
     Background,
     Quit,
