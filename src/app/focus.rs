@@ -37,10 +37,10 @@ impl Target {
     }
 }
 pub(super) fn targets(app: &App) -> Vec<Target> {
-    let mut targets = vec![Target::Scan, Target::Camera, Target::More, Target::Settings];
     if app.more_open {
-        targets.extend([Target::Desktop, Target::Quit]);
+        return vec![Target::More, Target::Desktop, Target::Quit];
     }
+    let mut targets = vec![Target::Scan, Target::Camera, Target::More, Target::Settings];
     if app.settings_open {
         targets.push(Target::SettingsAutoCopy);
     }

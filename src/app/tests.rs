@@ -780,7 +780,7 @@ fn keyboard_focus_cycles_visible_controls_and_activates_menu_without_os_action()
     assert!(focus::targets(&app).contains(&focus::Target::Desktop));
     app.focus = Some(focus::Target::Scan);
     let _ = app.update(Message::FocusNext(true));
-    assert_eq!(app.focus, Some(focus::Target::AutoCopy));
+    assert_eq!(app.focus, Some(focus::Target::Quit));
     app.reset_source();
     assert_eq!(app.focus, None);
 }
@@ -1158,4 +1158,39 @@ fn malformed_wifi_hidden_buffer_rejects_queued_selection() {
     let _ = app.update(Message::SelectText(id, 0, Action::SelectAll));
     assert!(!app.result_texts[&0].text().contains("secret"));
     assert!(app.result_texts[&0].selection().is_none());
+}
+
+#[test]
+fn more_menu_traps_focus_and_escape_only_dismisses_the_popup() {
+    let mut app = capture_tests::app();
+    let window = window::Id::unique();
+    app.state.window_ids.push(window);
+    app.selecting = true;
+    drop(app.update(Message::ToggleMore));
+    assert_eq!(
+        focus::targets(&app),
+        vec![
+            focus::Target::More,
+            focus::Target::Desktop,
+            focus::Target::Quit
+        ]
+    );
+    drop(app.update(Message::FocusNext(false)));
+    assert_eq!(app.focus, Some(focus::Target::Desktop));
+    assert!(
+        app.focus_ready,
+        "popup entries need no scrolling to become visible"
+    );
+    drop(app.update(Message::WindowKey(
+        window,
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+        false,
+        iced::event::Status::Ignored,
+    )));
+    assert!(!app.more_open);
+    assert!(
+        app.selecting,
+        "closing More must not cancel an existing region selection"
+    );
+    assert_eq!(app.focus, Some(focus::Target::More));
 }

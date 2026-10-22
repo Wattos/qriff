@@ -416,3 +416,19 @@ its card. The new multiple-result and Wi-Fi images were rendered from the actual
 Iced view with tiny-skia, using safe in-memory fixtures and production masking.
 The temporary rendering harness was removed; no fixture switch ships in the app.
 These checks did not execute real screenshot, camera, clipboard, or Wi-Fi actions.
+
+### More dropdown (2026-10-22)
+
+More now opens an Iced menu overlay anchored to its toolbar button, rather than
+inserting a second toolbar row. Its two actions are vertical; outside pointer
+presses dismiss and consume the event, and keyboard events do not reach result
+editors underneath. Tab and arrow navigation stay inside the popup, while Escape
+returns focus to More without cancelling an active region selection. The popup
+is clamped to the window width and uses Iced's native menu placement vertically.
+
+The actual widget regression checks unchanged button layout, edge placement,
+outside-click capture and Desktop capture dispatch without running the action.
+An app regression covers focus trapping and Escape. All 195 tests, clippy and the
+release build pass. The [dark menu capture](screenshots/native-more-menu-dark.png)
+was rendered from the actual native view using safe fixtures. The temporary
+screenshot harness was removed before final verification.

@@ -2,6 +2,7 @@ mod appearance;
 pub mod clipboard;
 mod focus;
 mod icons;
+mod more_menu;
 mod overlay;
 pub mod state;
 pub(crate) mod style;
@@ -27,6 +28,8 @@ pub enum Message {
     ),
     Appearance(bool, iced::Color),
     ToggleMore,
+    DismissMore,
+    MoreHovered(usize),
     ToggleSettings,
     RevealPassword(usize),
     Resized(f32),
@@ -507,6 +510,25 @@ impl App {
             Message::WindowResized(id, size) => self.window_resized(id, size),
             Message::WindowKey(id, key, shift, status) => {
                 if self.state.window_ids.contains(&id) {
+                    if self.more_open {
+                        use iced::keyboard::{Key, key::Named};
+                        let message = match key {
+                            Key::Named(Named::Escape) => Some(Message::DismissMore),
+                            Key::Named(Named::ArrowDown) => Some(Message::FocusNext(false)),
+                            Key::Named(Named::ArrowUp) => Some(Message::FocusNext(true)),
+                            Key::Named(Named::Tab) => Some(Message::FocusNext(shift)),
+                            Key::Named(Named::Enter | Named::Space) => {
+                                Some(Message::KeyboardActivate)
+                            }
+                            Key::Character(ref key) if key == " " => {
+                                Some(Message::KeyboardActivate)
+                            }
+                            _ => None,
+                        };
+                        if let Some(message) = message {
+                            return self.update_inner(message);
+                        }
+                    }
                     focus::key_message(&key, shift, status)
                         .map(|message| self.update_inner(message))
                         .unwrap_or_else(Task::none)
@@ -528,6 +550,25 @@ impl App {
             Message::ToggleMore => {
                 self.more_open = !self.more_open;
                 self.settings_open = false;
+                self.focus = Some(focus::Target::More);
+                self.focus_ready = true;
+                Task::none()
+            }
+            Message::DismissMore => {
+                self.more_open = false;
+                self.focus = Some(focus::Target::More);
+                self.focus_ready = true;
+                Task::none()
+            }
+            Message::MoreHovered(index) => {
+                if self.more_open {
+                    self.focus = Some(if index == 0 {
+                        focus::Target::Desktop
+                    } else {
+                        focus::Target::Quit
+                    });
+                    self.focus_ready = true;
+                }
                 Task::none()
             }
             Message::ToggleSettings => {
@@ -566,7 +607,12 @@ impl App {
             Message::FocusNext(reverse) => {
                 let target = focus::next(self, reverse);
                 self.focus = Some(target);
-                self.reveal_focus(target)
+                if self.more_open {
+                    self.focus_ready = true;
+                    Task::none()
+                } else {
+                    self.reveal_focus(target)
+                }
             }
             Message::Resized(width) => {
                 self.focus_ready = false;

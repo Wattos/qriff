@@ -380,7 +380,13 @@ pub(super) fn view(app: &App, _window_id: iced::window::Id) -> Element<'_, Messa
     .spacing(8)
     .align_y(iced::Alignment::Center);
     let options = row![
-        secondary(app, "More ▾", Target::More).on_press(Message::ToggleMore),
+        super::more_menu::view(
+            secondary(app, "More ▾", Target::More)
+                .on_press(Message::ToggleMore)
+                .into(),
+            app.more_open,
+            app.focus,
+        ),
         iced::widget::Space::new().width(Length::Fill),
         button(
             row![icon(Icon::Settings), text("Settings").size(13)]
@@ -405,21 +411,6 @@ pub(super) fn view(app: &App, _window_id: iced::window::Id) -> Element<'_, Messa
         container(toolbar).padding([12, 16]).style(style::chrome),
         iced::widget::rule::horizontal(1)
     ];
-    if app.more_open {
-        main = main.push(
-            container(
-                row![
-                    secondary(app, "Desktop capture…", Target::Desktop)
-                        .on_press(Message::DesktopCapture),
-                    secondary(app, "Quit", Target::Quit)
-                        .on_press(Message::UserCommand(Command::Quit))
-                ]
-                .spacing(8),
-            )
-            .padding([10, 16])
-            .style(style::chrome),
-        );
-    }
     if app.settings_open {
         main = main.push(container(column![text("Scan preferences").size(15), auto_copy(app, Target::SettingsAutoCopy), text("Copy when a scan finds one QR code. With several codes, choose a result to copy.\nOpening links, calling and connecting to Wi-Fi always require a click.").size(12)].spacing(12)).padding(18).width(Length::Fill).style(style::card));
     }
