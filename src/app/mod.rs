@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod state;
 use crate::{
     cli::Command,
@@ -23,6 +24,10 @@ pub enum Message {
     DecodeRequested(crate::jobs::JobId, Arc<image::GrayImage>),
     DecodeFinished(Arc<crate::jobs::DecodeOutcome>),
     CopyResult(usize),
+    AutoCopyChanged(bool),
+    PreferencesLoaded(crate::settings::LoadedPreferences),
+    PreferencesSaved(u64, Result<(), String>),
+    Copied(crate::jobs::JobId, usize),
     OpenResult(usize),
     OpenFailed(String),
     CaptureFinished(
@@ -51,6 +56,14 @@ impl std::hash::Hash for PrimarySource {
 }
 struct App {
     pub state: state::State,
+    preferences: crate::settings::Preferences,
+    preferences_loaded: bool,
+    preference_path: Option<std::path::PathBuf>,
+    preference_revision: u64,
+    saving: Option<u64>,
+    settings_warning: Option<String>,
+    auto_copy: clipboard::AutoCopyPolicy,
+    copy_feedback: Option<(crate::jobs::JobId, usize)>,
     primary: Arc<Mutex<Option<Primary>>>,
     decoder: Arc<crate::jobs::Decoder>,
     screenshot: Option<Arc<crate::capture::Prepared>>,
@@ -78,6 +91,14 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                     background: command == Command::Background,
                     ..Default::default()
                 },
+                preferences: Default::default(),
+                preferences_loaded: false,
+                preference_path: None,
+                preference_revision: 0,
+                saving: None,
+                settings_warning: None,
+                auto_copy: Default::default(),
+                copy_feedback: None,
                 primary: primary.clone(),
                 decoder: Arc::new(crate::jobs::Decoder::new()),
                 screenshot: None,
@@ -98,7 +119,19 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
             } else {
                 app.command(command)
             };
-            (app, task)
+            let load = Task::perform(
+                async {
+                    tokio::task::spawn_blocking(crate::settings::load)
+                        .await
+                        .unwrap_or_else(|_| crate::settings::LoadedPreferences {
+                            preferences: Default::default(),
+                            path: None,
+                            warning: Some("Settings unavailable.".into()),
+                        })
+                },
+                Message::PreferencesLoaded,
+            );
+            (app, Task::batch([task, load]))
         },
         App::update,
         App::view,
@@ -111,6 +144,7 @@ impl App {
     /// All source switches (including camera) must invalidate decode/capture work here.
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.invalidate_source();
+        self.copy_feedback = None;
         self.state.begin_session()
     }
     /// Stop capture and invalidate queued messages while retaining visible results.
@@ -286,15 +320,67 @@ impl App {
                 }
                 Task::none()
             }
-            Message::DecodeFinished(outcome) => {
-                self.state.accept_decode(&outcome);
+            Message::PreferencesLoaded(loaded) => {
+                self.preferences_loaded = true;
+                self.preference_path = loaded.path;
+                self.settings_warning = loaded.warning;
+                if self.preference_revision == 0 {
+                    self.preferences = loaded.preferences;
+                    Task::none()
+                } else {
+                    self.save_preferences()
+                }
+            }
+            Message::AutoCopyChanged(enabled) => {
+                self.preferences.auto_copy_single = enabled;
+                self.preference_revision = self.preference_revision.wrapping_add(1);
+                self.save_preferences()
+            }
+            Message::PreferencesSaved(revision, result) => {
+                if self.saving != Some(revision) {
+                    return Task::none();
+                }
+                self.saving = None;
+                if self.preference_revision != revision {
+                    return self.save_preferences();
+                }
+                self.settings_warning = result.err().map(|_| {
+                    "Settings could not be saved. Your choice applies until the app exits.".into()
+                });
                 Task::none()
+            }
+            Message::Copied(session, index) => {
+                if session.0 == self.state.session && index < self.state.results.len() {
+                    self.copy_feedback = Some((session, index));
+                }
+                Task::none()
+            }
+            Message::DecodeFinished(outcome) => {
+                if outcome.id.0 != self.state.session {
+                    return Task::none();
+                }
+                let previous = self.state.results.len();
+                self.state.accept_decode(&outcome);
+                if let Some(text) = self.auto_copy.on_results(
+                    self.preferences.auto_copy_single,
+                    outcome.id,
+                    &self.state.results,
+                    self.state.results.len() - previous,
+                ) {
+                    iced::clipboard::write(text).chain(Task::done(Message::Copied(outcome.id, 0)))
+                } else {
+                    Task::none()
+                }
             }
             Message::CopyResult(index) => self
                 .state
                 .results
                 .get(index)
-                .map(|result| iced::clipboard::write(result.display_text.clone()))
+                .map(|result| {
+                    iced::clipboard::write(result.display_text.clone()).chain(Task::done(
+                        Message::Copied(crate::jobs::JobId(self.state.session), index),
+                    ))
+                })
                 .unwrap_or_else(Task::none),
             Message::OpenResult(index) => {
                 let Some(url) =
@@ -393,6 +479,29 @@ impl App {
             Message::Opened(_) => Task::none(),
         }
     }
+    /// At most one write is in flight. Intermediate changes are coalesced into the next write.
+    fn save_preferences(&mut self) -> Task<Message> {
+        if !self.preferences_loaded || self.saving.is_some() {
+            return Task::none();
+        }
+        let Some(path) = self.preference_path.clone() else {
+            self.settings_warning =
+                Some("Settings unavailable. Your choice applies until the app exits.".into());
+            return Task::none();
+        };
+        let preferences = self.preferences;
+        let revision = self.preference_revision;
+        self.saving = Some(revision);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || crate::settings::save(&path, &preferences))
+                    .await
+                    .map_err(|_| "Settings worker unavailable".to_owned())
+                    .and_then(|result| result.map_err(|_| "Could not save settings".to_owned()))
+            },
+            move |result| Message::PreferencesSaved(revision, result),
+        )
+    }
     fn start_camera(&mut self, device: crate::camera::Device) -> Task<Message> {
         let id = self.reset_source();
         self.camera_mode = true;
@@ -462,7 +571,20 @@ impl App {
             }
             results = results.push(column![text(&result.display_text), actions].spacing(4));
         }
-        let mut content = column![];
+        let mut content = column![
+            iced::widget::checkbox(self.preferences.auto_copy_single)
+                .label("Automatically copy a single result")
+                .on_toggle(Message::AutoCopyChanged)
+        ];
+        if let Some(warning) = &self.settings_warning {
+            content = content.push(text(warning));
+        }
+        if self
+            .copy_feedback
+            .is_some_and(|(session, _)| session.0 == self.state.session)
+        {
+            content = content.push(text("Copied to clipboard."));
+        }
         if self.camera_mode {
             content = content.push(
                 row![
@@ -674,6 +796,14 @@ mod capture_tests {
     pub(super) fn app() -> App {
         App {
             state: Default::default(),
+            preferences: Default::default(),
+            preferences_loaded: false,
+            preference_path: None,
+            preference_revision: 0,
+            saving: None,
+            settings_warning: None,
+            auto_copy: Default::default(),
+            copy_feedback: None,
             primary: Arc::new(Mutex::new(None)),
             decoder: Arc::new(crate::jobs::Decoder::new()),
             screenshot: None,
@@ -957,5 +1087,174 @@ mod quick_capture_tests {
         assert_eq!(app.state.window_ids.len(), 1);
         let _ = app.command(Command::ScanScreen);
         assert_eq!(app.capture_mode, crate::capture::CaptureMode::Quick);
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+    #[test]
+    fn toggle_during_load_wins_and_queued_saves_coalesce() {
+        let mut app = super::capture_tests::app();
+        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert!(
+            app.update(Message::PreferencesLoaded(
+                crate::settings::LoadedPreferences {
+                    preferences: Default::default(),
+                    path: Some(path),
+                    warning: None
+                }
+            ))
+            .units()
+                > 0
+        );
+        assert!(app.preferences.auto_copy_single);
+        let first = app.saving.unwrap();
+        assert_eq!(app.update(Message::AutoCopyChanged(false)).units(), 0);
+        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
+        assert_eq!(app.update(Message::AutoCopyChanged(false)).units(), 0);
+        assert!(app.update(Message::PreferencesSaved(first, Ok(()))).units() > 0);
+        assert_eq!(app.saving, Some(app.preference_revision));
+        assert!(!app.preferences.auto_copy_single);
+    }
+    #[test]
+    fn settings_warning_preserves_results_and_scan_error() {
+        let mut app = super::capture_tests::app();
+        app.state
+            .results
+            .push(crate::results::QrResult::from_payload(b"keep".to_vec()));
+        app.state.error = Some("scan error".into());
+        let _ = app.update(Message::PreferencesLoaded(
+            crate::settings::LoadedPreferences {
+                preferences: Default::default(),
+                path: None,
+                warning: Some("settings error".into()),
+            },
+        ));
+        assert_eq!(app.settings_warning.as_deref(), Some("settings error"));
+        assert_eq!(app.state.error.as_deref(), Some("scan error"));
+        assert_eq!(app.state.results.len(), 1);
+    }
+    #[tokio::test]
+    async fn accepted_single_requests_exact_copy_and_stale_or_duplicate_requests_none() {
+        use iced::futures::StreamExt;
+        let mut app = super::capture_tests::app();
+        app.preferences.auto_copy_single = true;
+        let id = app.state.begin_session();
+        let outcome = Arc::new(crate::jobs::DecodeOutcome {
+            id,
+            result: Ok(vec![
+                crate::results::QrResult::from_payload(b"WIFI:T:WPA;S:home;P:secret;;".to_vec()),
+                crate::results::QrResult::from_payload(b"WIFI:T:WPA;S:home;P:secret;;".to_vec()),
+            ]),
+        });
+        let task = app.update(Message::DecodeFinished(outcome.clone()));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        let mut copied = false;
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
+                contents,
+                ..
+            }) = action
+            {
+                assert_eq!(contents, "WIFI:T:WPA;S:home;P:secret;;");
+                copied = true;
+            }
+        }
+        assert!(copied);
+        assert_eq!(
+            app.update(Message::DecodeFinished(outcome.clone())).units(),
+            0
+        );
+        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
+        app.state.begin_session();
+        assert_eq!(app.update(Message::DecodeFinished(outcome)).units(), 0);
+    }
+}
+
+#[cfg(test)]
+mod persistence_action_tests {
+    use super::*;
+    use iced::futures::StreamExt;
+    async fn complete(task: Task<Message>) -> Message {
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                return message;
+            }
+        }
+        panic!("save must report completion")
+    }
+    #[tokio::test]
+    async fn serialized_writes_retain_last_toggle_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config/settings.json");
+        let mut app = super::capture_tests::app();
+        let _ = app.update(Message::PreferencesLoaded(
+            crate::settings::LoadedPreferences {
+                preferences: Default::default(),
+                path: Some(path.clone()),
+                warning: None,
+            },
+        ));
+        let first = app.update(Message::AutoCopyChanged(true));
+        let _ = app.update(Message::AutoCopyChanged(false));
+        let _ = app.update(Message::AutoCopyChanged(true));
+        let _ = app.update(Message::AutoCopyChanged(false));
+        let message = complete(first).await;
+        let last = app.update(message);
+        let message = complete(last).await;
+        assert_eq!(app.update(message).units(), 0);
+        let saved: crate::settings::Preferences =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(!saved.auto_copy_single);
+        assert!(app.saving.is_none());
+    }
+    #[tokio::test]
+    async fn manual_copy_uses_exact_binary_text_and_multicode_never_autocopies() {
+        let mut app = super::capture_tests::app();
+        app.preferences.auto_copy_single = true;
+        let id = app.state.begin_session();
+        let binary = crate::results::QrResult::from_payload(vec![255, 0]);
+        let task = app.update(Message::DecodeFinished(Arc::new(
+            crate::jobs::DecodeOutcome {
+                id,
+                result: Ok(vec![
+                    binary.clone(),
+                    crate::results::QrResult::from_payload(b"other".to_vec()),
+                ]),
+            },
+        )));
+        assert_eq!(task.units(), 0);
+        let mut stream =
+            iced_runtime::task::into_stream(app.update(Message::CopyResult(0))).unwrap();
+        let mut text = None;
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Clipboard(iced_runtime::clipboard::Action::Write {
+                contents,
+                ..
+            }) = action
+            {
+                text = Some(contents);
+            }
+        }
+        assert_eq!(text, Some(binary.display_text));
+        assert_eq!(app.update(Message::AutoCopyChanged(true)).units(), 0);
+    }
+    #[test]
+    fn save_failure_does_not_change_results_or_scan_error() {
+        let mut app = super::capture_tests::app();
+        app.state
+            .results
+            .push(crate::results::QrResult::from_payload(b"keep".to_vec()));
+        app.state.error = Some("decode failure".into());
+        app.saving = Some(3);
+        app.preference_revision = 3;
+        let _ = app.update(Message::PreferencesSaved(3, Err("disk full".into())));
+        assert!(app.settings_warning.is_some());
+        assert_eq!(app.state.results[0].payload, b"keep");
+        assert_eq!(app.state.error.as_deref(), Some("decode failure"));
     }
 }
