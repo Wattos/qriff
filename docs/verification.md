@@ -377,3 +377,23 @@ and failed copy feedback; retained Last scan results; and stale/duplicate decode
 completion suppression. Existing overlay lifecycle tests now use multiple
 locations, including the real spatial-worker synthetic fixture with two QR codes.
 No new physical clipboard or native-input acceptance is claimed.
+
+### Mixed-version screen detection (2026-10-22)
+
+A supplied 1784×1176 screenshot with six QR examples (versions 1, 2, 3, 4, 10
+and 25) reproduced a partial result: four payloads decoded, while other finder
+patterns were joined across neighboring codes into invalid oversized grids.
+Individual crops decoded successfully. A screen-only fixed-threshold second
+pass now supplements adaptive detection; successful original results remain,
+and overlapping repeated detections of the same payload share one highlight.
+Separate physical locations of identical payloads remain distinct. Prepared
+images are processed sequentially, within the existing input pixel limit.
+The non-spatial camera decoder retains its original single-pass path.
+
+The corrected release decoder recovered **six payloads at six locations** from
+the supplied screenshot. A generated, fractionally scaled six-version fixture
+reproduces the failure without retaining the user's screenshot or QR contents;
+it failed with four results before the fix and passes with six results and
+correct per-code coordinates after it. Existing duplicate-placement and rotated
+binary/text tests also check that retries do not add duplicate highlights.
+No new live portal, camera or physical input acceptance is claimed.
