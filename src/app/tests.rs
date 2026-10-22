@@ -24,6 +24,7 @@ mod capture_tests {
             copy_feedback: None,
             result_actions: Default::default(),
             action_token: 0,
+            retained_result_session: None,
             primary: Arc::new(Mutex::new(None)),
             decoder: Arc::new(crate::jobs::Decoder::new()),
             screenshot: None,
@@ -482,6 +483,106 @@ mod persistence_action_tests {
 #[cfg(test)]
 mod explicit_action_tests {
     use super::*;
+    // Advancing capture identity must not revive a pending action or lose its feedback.
+    #[test]
+    fn retained_camera_actions_survive_stop_and_failure() {
+        for camera_error in [false, true] {
+            for completion in [Ok(()), Err(crate::actions::ActionError::Authorization)] {
+                let mut app = super::capture_tests::app();
+                let id = app.reset_source();
+                app.camera_mode = true;
+                let payload = b"WIFI:T:nopass;S:home;;".to_vec();
+                drop(app.update(Message::DecodeFinished(Arc::new(
+                    crate::jobs::DecodeOutcome {
+                        id,
+                        result: Ok(vec![crate::results::QrResult::from_payload(
+                            payload.clone(),
+                        )]),
+                    },
+                ))));
+                let task = app.update(Message::ActivateResult(0));
+                assert!(task.units() > 0);
+                drop(task); // Never poll the platform action.
+                let pending = app.result_actions[&0].clone();
+                if camera_error {
+                    drop(
+                        app.update(Message::CameraOutcome(Arc::new(crate::camera::Outcome {
+                            id,
+                            event: crate::camera::Event::Error("unplugged".into()),
+                        }))),
+                    );
+                } else {
+                    drop(app.update(Message::StopCamera));
+                }
+                assert_ne!(app.state.session, id.0);
+                assert_eq!(app.state.results[0].payload, payload);
+                assert_eq!(app.update(Message::ActivateResult(0)).units(), 0);
+                assert_eq!(app.result_actions[&0].token, pending.token);
+                drop(app.update(Message::DecodeFinished(Arc::new(
+                    crate::jobs::DecodeOutcome {
+                        id,
+                        result: Ok(vec![crate::results::QrResult::from_payload(
+                            b"stale".to_vec(),
+                        )]),
+                    },
+                ))));
+                assert_eq!(app.state.results.len(), 1);
+                drop(app.update(Message::ActionFinished(
+                    pending.key,
+                    pending.token,
+                    completion.clone(),
+                )));
+                match completion {
+                    Ok(()) => assert!(matches!(
+                        app.result_actions[&0].status,
+                        crate::actions::ActionStatus::Succeeded
+                    )),
+                    Err(error) => assert!(
+                        matches!(&app.result_actions[&0].status, crate::actions::ActionStatus::Failed(actual) if *actual == error)
+                    ),
+                }
+                let scan_error = camera_error.then_some("Camera failed: unplugged");
+                assert_eq!(app.state.error.as_deref(), scan_error);
+                drop(app.update(Message::StopCamera));
+                assert!(!matches!(
+                    app.result_actions[&0].status,
+                    crate::actions::ActionStatus::Pending
+                ));
+                let fresh = app.reset_source();
+                drop(app.update(Message::DecodeFinished(Arc::new(
+                    crate::jobs::DecodeOutcome {
+                        id: fresh,
+                        result: Ok(vec![crate::results::QrResult::from_payload(payload)]),
+                    },
+                ))));
+                drop(app.update(Message::ActivateResult(0)));
+                let token = app.result_actions[&0].token;
+                drop(app.update(Message::ActionFinished(pending.key, pending.token, Ok(()))));
+                assert_eq!(app.result_actions[&0].token, token);
+                assert!(matches!(
+                    app.result_actions[&0].status,
+                    crate::actions::ActionStatus::Pending
+                ));
+            }
+        }
+    }
+    #[test]
+    fn copied_feedback_rejects_stale_session_and_out_of_range_index() {
+        let mut app = super::capture_tests::app();
+        let old = app.reset_source();
+        let current = app.reset_source();
+        app.state
+            .results
+            .push(crate::results::QrResult::from_payload(b"current".to_vec()));
+        app.state.error = Some("scan error".into());
+        drop(app.update(Message::Copied(current, 0)));
+        assert_eq!(app.copy_feedback, Some((current, 0)));
+        drop(app.update(Message::Copied(old, 0)));
+        drop(app.update(Message::Copied(current, 1)));
+        assert_eq!(app.copy_feedback, Some((current, 0)));
+        assert_eq!(app.state.results[0].payload, b"current");
+        assert_eq!(app.state.error.as_deref(), Some("scan error"));
+    }
     #[test]
     fn click_only_duplicate_pending_and_stale_outcomes() {
         let mut app = super::capture_tests::app();

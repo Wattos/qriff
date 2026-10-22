@@ -89,6 +89,7 @@ struct App {
     copy_feedback: Option<(crate::jobs::JobId, usize)>,
     result_actions: std::collections::HashMap<usize, crate::actions::ActionState>,
     action_token: u64,
+    retained_result_session: Option<crate::jobs::JobId>,
     primary: Arc<Mutex<Option<Primary>>>,
     decoder: Arc<crate::jobs::Decoder>,
     screenshot: Option<Arc<crate::capture::Prepared>>,
@@ -135,6 +136,7 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                 copy_feedback: None,
                 result_actions: Default::default(),
                 action_token: 0,
+                retained_result_session: None,
                 primary: primary.clone(),
                 decoder: Arc::new(crate::jobs::Decoder::new()),
                 screenshot: None,
@@ -187,10 +189,17 @@ impl App {
         self.revealed.clear();
         self.copy_feedback = None;
         self.result_actions.clear();
+        self.retained_result_session = None;
         self.state.begin_session()
+    }
+    /// Identity of the visible cards, independent of stopped capture generations.
+    fn result_session(&self) -> crate::jobs::JobId {
+        self.retained_result_session
+            .unwrap_or(crate::jobs::JobId(self.state.session))
     }
     /// Stop capture and invalidate queued messages while retaining visible results.
     fn invalidate_source(&mut self) {
+        self.retained_result_session = Some(self.result_session());
         self.decoder.cancel();
         if let Some(camera) = self.camera.take() {
             camera.stop();
@@ -489,7 +498,7 @@ impl App {
                 Task::none()
             }
             Message::Copied(session, index) => {
-                if session.0 == self.state.session && index < self.state.results.len() {
+                if session == self.result_session() && index < self.state.results.len() {
                     self.copy_feedback = Some((session, index));
                 }
                 Task::none()
@@ -516,14 +525,13 @@ impl App {
                 .results
                 .get(index)
                 .map(|result| {
-                    iced::clipboard::write(result.display_text.clone()).chain(Task::done(
-                        Message::Copied(crate::jobs::JobId(self.state.session), index),
-                    ))
+                    iced::clipboard::write(result.display_text.clone())
+                        .chain(Task::done(Message::Copied(self.result_session(), index)))
                 })
                 .unwrap_or_else(Task::none),
             Message::ActivateResult(index) => {
                 let key = crate::actions::ActionKey {
-                    session: crate::jobs::JobId(self.state.session),
+                    session: self.result_session(),
                     result_index: index,
                 };
                 if self.result_actions.get(&index).is_some_and(|state| {
@@ -558,7 +566,7 @@ impl App {
                 })
             }
             Message::ActionFinished(key, token, outcome) => {
-                if key.session.0 == self.state.session
+                if key.session == self.result_session()
                     && let Some(state) =
                         self.result_actions
                             .get_mut(&key.result_index)
@@ -617,10 +625,7 @@ impl App {
                     crate::camera::Event::Error(error) => {
                         // A completed decode may already be queued in the UI. End the
                         // source generation without discarding results found so far.
-                        self.decoder.cancel();
-                        self.state.session = self.state.session.wrapping_add(1);
-                        self.camera_preview = None;
-                        self.state.busy = false;
+                        self.invalidate_source();
                         self.state.error = Some(format!("Camera failed: {error}"));
                         self.camera = None;
                     }

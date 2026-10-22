@@ -165,7 +165,7 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
     let mut actions = row![].spacing(8);
     if let Some(action) = result.action() {
         let pending = app.result_actions.get(&index).is_some_and(|s| {
-            s.key.session.0 == app.state.session
+            s.key.session == app.result_session()
                 && matches!(s.status, crate::actions::ActionStatus::Pending)
         });
         let label = match action {
@@ -197,7 +197,7 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
     if let Some(state) = app
         .result_actions
         .get(&index)
-        .filter(|s| s.key.session.0 == app.state.session)
+        .filter(|s| s.key.session == app.result_session())
     {
         match &state.status {
             crate::actions::ActionStatus::Failed(e) => {
@@ -456,7 +456,7 @@ pub(super) fn view(app: &App, _window_id: iced::window::Id) -> Element<'_, Messa
         .width(Length::Fill);
     if app
         .copy_feedback
-        .is_some_and(|(session, _)| session.0 == app.state.session)
+        .is_some_and(|(session, _)| session == app.result_session())
     {
         feedback = feedback.push(text("Copied to clipboard").size(12));
     }
