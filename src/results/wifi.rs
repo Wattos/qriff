@@ -105,6 +105,9 @@ pub fn parse(input: &str) -> Result<WifiNetwork, String> {
         }
     };
     let password = fields.get("P").cloned();
+    if matches!(security, WifiSecurity::Open) && password.as_ref().is_some_and(|p| !p.is_empty()) {
+        return Err(invalid());
+    }
     if matches!(security, WifiSecurity::WpaPersonal | WifiSecurity::Sae)
         && password.as_ref().is_none_or(|p| p.is_empty())
     {

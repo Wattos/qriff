@@ -104,6 +104,7 @@ fn wifi_fields_and_escaping() {
 #[test]
 fn malformed_wifi_never_connects() {
     for s in [
+        "WIFI:T:nopass;S:home;P:secret;;",
         "WIFI:T:nopass;;",
         "WIFI:S:;T:nopass;;",
         "WIFI:S:a;S:b;T:nopass;;",
@@ -116,6 +117,14 @@ fn malformed_wifi_never_connects() {
         assert!(wifi::parse(s).is_err(), "{s}");
         assert!(result(s).action().is_none());
     }
+}
+#[test]
+fn contradictory_open_wifi_keeps_exact_raw_copy() {
+    let input = "WIFI:T:nopass;S:home;P:secret;;";
+    let r = result(input);
+    assert_eq!(r.payload, input.as_bytes());
+    assert_eq!(r.display_text, input);
+    assert!(r.action().is_none());
 }
 #[test]
 fn unsupported_wifi_stays_unsupported_and_secrets_are_redacted() {

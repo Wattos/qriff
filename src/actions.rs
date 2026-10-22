@@ -139,6 +139,9 @@ impl WifiRequest {
             return Err(ActionError::InvalidRequest);
         }
         let key = match network.security {
+            WifiSecurity::Open if network.password.as_ref().is_some_and(|p| !p.is_empty()) => {
+                return Err(ActionError::InvalidRequest);
+            }
             WifiSecurity::Open => None,
             WifiSecurity::WpaPersonal => Some("wpa-psk"),
             WifiSecurity::Sae => Some("sae"),
@@ -219,32 +222,72 @@ async fn connect_with_timeout(
 }
 fn dbus_error(error: zbus::Error) -> ActionError {
     match error {
-        zbus::Error::MethodError(name, _, _)
-            if name.as_str().ends_with("PermissionDenied")
-                || name.as_str().ends_with("NotAuthorized")
-                || name.as_str().ends_with("AccessDenied") =>
-        {
-            ActionError::Authorization
-        }
-        zbus::Error::MethodError(name, _, _)
-            if name.as_str().ends_with("ServiceUnknown")
-                || name.as_str().ends_with("NameHasNoOwner") =>
-        {
-            ActionError::ServiceUnavailable
-        }
+        zbus::Error::MethodError(name, _, _) => dbus_error_name(name.as_str()),
         _ => ActionError::ActivationFailed,
     }
 }
+fn dbus_error_name(name: &str) -> ActionError {
+    if name.ends_with("PermissionDenied")
+        || name.ends_with("NotAuthorized")
+        || name.ends_with("AccessDenied")
+    {
+        ActionError::Authorization
+    } else if name.ends_with("ServiceUnknown") || name.ends_with("NameHasNoOwner") {
+        ActionError::ServiceUnavailable
+    } else {
+        ActionError::ActivationFailed
+    }
+}
 fn activation_outcome(state: u32, reason: u32) -> Option<Result<(), ActionError>> {
+    activation_outcome_with_device(state, reason, None)
+}
+fn activation_outcome_with_device(
+    state: u32,
+    reason: u32,
+    device_reason: Option<u32>,
+) -> Option<Result<(), ActionError>> {
     match state {
         2 => Some(Ok(())), // NM_ACTIVE_CONNECTION_STATE_ACTIVATED
         3 | 4 => Some(Err(if matches!(reason, 9 | 10) {
             ActionError::PasswordRejected
+        } else if matches!(device_reason, Some(7..=11)) {
+            // NMDeviceStateReason: missing secrets and supplicant authentication failures.
+            ActionError::PasswordRejected
+        } else if device_reason == Some(53) {
+            ActionError::NetworkUnavailable
         } else {
             ActionError::ActivationFailed
         })),
         _ => None,
     }
+}
+async fn observed_activation_outcome(
+    state: u32,
+    reason: u32,
+    device: &zbus::Proxy<'_>,
+) -> Option<Result<(), ActionError>> {
+    let outcome = activation_outcome(state, reason)?;
+    if !matches!(outcome, Err(ActionError::ActivationFailed)) {
+        return Some(outcome);
+    }
+    let device_reason = device
+        .get_property::<(u32, u32)>("StateReason")
+        .await
+        .ok()
+        .map(|(_, reason)| reason);
+    activation_outcome_with_device(state, reason, device_reason)
+}
+type DeviceChoice = (bool, OwnedObjectPath, OwnedObjectPath);
+fn choose_candidate(
+    mut candidates: Vec<DeviceChoice>,
+    compatible_device: bool,
+) -> Result<DeviceChoice, ActionError> {
+    candidates.sort_by_key(|(active, _, _)| !*active);
+    candidates.into_iter().next().ok_or(if compatible_device {
+        ActionError::NetworkUnavailable
+    } else {
+        ActionError::NoDevice
+    })
 }
 const NM: &str = "org.freedesktop.NetworkManager";
 async fn proxy<'a>(
@@ -291,16 +334,15 @@ impl WifiAdapter for NetworkManager {
                 "org.freedesktop.NetworkManager.Device",
             )
             .await?;
-            if device
+            let device_type = device
                 .get_property::<u32>("DeviceType")
                 .await
-                .map_err(dbus_error)?
-                != 2
-                || !device
-                    .get_property::<bool>("Managed")
-                    .await
-                    .map_err(dbus_error)?
-            {
+                .map_err(dbus_error)?;
+            let managed = device
+                .get_property::<bool>("Managed")
+                .await
+                .map_err(dbus_error)?;
+            if device_type != 2 || !managed {
                 continue;
             }
             let state = device
@@ -320,7 +362,7 @@ impl WifiAdapter for NetworkManager {
                 .get_property::<u32>("WirelessCapabilities")
                 .await
                 .map_err(dbus_error)?;
-            if !matches!(network.security, WifiSecurity::Open) && capabilities & 0x30 == 0 {
+            if !device_eligible(device_type, managed, state, capabilities, &network.security) {
                 continue;
             }
             compatible_device = true;
@@ -370,12 +412,13 @@ impl WifiAdapter for NetworkManager {
             }
         }
         // Prefer an enabled compatible card already serving the user's desktop.
-        candidates.sort_by_key(|(active, _, _)| !*active);
-        let (_, device, ap) = candidates.into_iter().next().ok_or(if compatible_device {
-            ActionError::NetworkUnavailable
-        } else {
-            ActionError::NoDevice
-        })?;
+        let (_, device, ap) = choose_candidate(candidates, compatible_device)?;
+        let selected_device = proxy(
+            &connection,
+            device.as_str(),
+            "org.freedesktop.NetworkManager.Device",
+        )
+        .await?;
         let (_, active, _): (
             OwnedObjectPath,
             OwnedObjectPath,
@@ -383,7 +426,7 @@ impl WifiAdapter for NetworkManager {
         ) = manager
             .call(
                 "AddAndActivateConnection2",
-                &(request.settings, device, ap, request.options),
+                &(request.settings, device.clone(), ap, request.options),
             )
             .await
             .map_err(dbus_error)?;
@@ -402,7 +445,7 @@ impl WifiAdapter for NetworkManager {
             .get_property::<u32>("State")
             .await
             .map_err(dbus_error)?;
-        if let Some(result) = activation_outcome(state, 0) {
+        if let Some(result) = observed_activation_outcome(state, 0, &selected_device).await {
             return result;
         }
         while let Some(message) = changes.next().await {
@@ -410,7 +453,8 @@ impl WifiAdapter for NetworkManager {
                 .body()
                 .deserialize()
                 .map_err(|_| ActionError::ActivationFailed)?;
-            if let Some(result) = activation_outcome(state, reason) {
+            if let Some(result) = observed_activation_outcome(state, reason, &selected_device).await
+            {
                 return result;
             }
         }
@@ -425,13 +469,43 @@ fn ap_compatible(security: &WifiSecurity, flags: u32, wpa: u32, rsn: u32) -> boo
         WifiSecurity::Unsupported(_) => false,
     }
 }
+fn device_eligible(
+    device_type: u32,
+    managed: bool,
+    state: u32,
+    capabilities: u32,
+    security: &WifiSecurity,
+) -> bool {
+    device_type == 2
+        && managed
+        && state >= 30
+        && match security {
+            WifiSecurity::Open => true,
+            WifiSecurity::WpaPersonal => capabilities & 0x30 != 0,
+            WifiSecurity::Sae => capabilities & 0x20 != 0,
+            WifiSecurity::Unsupported(_) => false,
+        }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn wifi(auth: &str) -> WifiNetwork {
-        crate::results::wifi::parse(&format!("WIFI:T:{auth};S:Café;P:very-secret;H:true;;"))
-            .unwrap()
+        let password = if auth == "nopass" {
+            ""
+        } else {
+            "P:very-secret;"
+        };
+        crate::results::wifi::parse(&format!("WIFI:T:{auth};S:Café;{password}H:true;;")).unwrap()
+    }
+    #[test]
+    fn constructed_open_wifi_with_password_is_rejected_before_adapter() {
+        let mut network = wifi("nopass");
+        network.password = Some("secret".into());
+        assert_eq!(
+            WifiRequest::new(&network).unwrap_err(),
+            ActionError::InvalidRequest
+        );
     }
     #[test]
     fn typed_request_preserves_bytes_security_and_private_lifetime() {
@@ -494,6 +568,75 @@ mod tests {
                 .contains("password")
         );
         assert!(activation_outcome(4, 0).unwrap().is_err());
+    }
+    #[test]
+    fn device_failure_reasons_refine_activation_feedback() {
+        assert_eq!(
+            activation_outcome_with_device(4, 3, Some(7)),
+            Some(Err(ActionError::PasswordRejected))
+        );
+        assert_eq!(
+            activation_outcome_with_device(4, 3, Some(10)),
+            Some(Err(ActionError::PasswordRejected))
+        );
+        assert_eq!(
+            activation_outcome_with_device(4, 3, Some(53)),
+            Some(Err(ActionError::NetworkUnavailable))
+        );
+        assert_eq!(
+            activation_outcome_with_device(4, 3, Some(17)),
+            Some(Err(ActionError::ActivationFailed))
+        );
+        assert_eq!(activation_outcome_with_device(2, 0, Some(7)), Some(Ok(())));
+    }
+    #[test]
+    fn device_selection_prefers_connected_card_and_distinguishes_absence() {
+        let candidate = |active: bool, n: &str| {
+            (
+                active,
+                OwnedObjectPath::try_from(format!("/dev/{n}")).unwrap(),
+                OwnedObjectPath::try_from("/ap/one").unwrap(),
+            )
+        };
+        assert_eq!(
+            choose_candidate(
+                vec![candidate(false, "idle"), candidate(true, "serving")],
+                true
+            )
+            .unwrap()
+            .1
+            .as_str(),
+            "/dev/serving"
+        );
+        assert!(matches!(
+            choose_candidate(Vec::new(), false),
+            Err(ActionError::NoDevice)
+        ));
+        assert!(matches!(
+            choose_candidate(Vec::new(), true),
+            Err(ActionError::NetworkUnavailable)
+        ));
+    }
+    #[test]
+    fn discovery_rejects_unmanaged_or_incompatible_devices_and_access_points() {
+        assert!(!device_eligible(2, false, 100, 0x20, &WifiSecurity::Sae));
+        assert!(!device_eligible(1, true, 100, 0x20, &WifiSecurity::Sae));
+        assert!(!device_eligible(2, true, 20, 0x20, &WifiSecurity::Sae));
+        assert!(!device_eligible(2, true, 30, 0x10, &WifiSecurity::Sae));
+        assert!(device_eligible(2, true, 30, 0x20, &WifiSecurity::Sae));
+        assert!(ap_compatible(&WifiSecurity::Sae, 1, 0, 0x400));
+        assert!(!ap_compatible(&WifiSecurity::Sae, 1, 0x100, 0));
+    }
+    #[test]
+    fn dbus_error_names_cover_service_and_authorization() {
+        assert_eq!(
+            dbus_error_name("org.freedesktop.DBus.Error.ServiceUnknown"),
+            ActionError::ServiceUnavailable
+        );
+        assert_eq!(
+            dbus_error_name("org.freedesktop.NetworkManager.Settings.Connection.NotAuthorized"),
+            ActionError::Authorization
+        );
     }
     struct FakeAdapter {
         failure: Option<ActionError>,
