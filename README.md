@@ -9,7 +9,8 @@
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-35dfac?style=flat-square&amp;labelColor=17212b" alt="MIT license" /></a>
   </p>
   <p>
-    <a href="#get-started"><strong>Get started</strong></a> ·
+    <a href="https://github.com/Wattos/qriff/releases"><strong>Download for Linux</strong></a> ·
+    <a href="#get-started">Get started</a> ·
     <a href="#features">Features</a> ·
     <a href="#see-it-in-action">See it in action</a> ·
     <a href="docs/usage.md">Documentation</a> ·
@@ -107,9 +108,14 @@ connections are not supported.
 
 ## Get started
 
-Linux x86_64 bundles are built by [GitHub Actions](https://github.com/Wattos/qriff/actions/workflows/linux-release.yml).
-Published versions are available on the [Releases page](https://github.com/Wattos/qriff/releases):
-choose **AppImage** for a single-file app, or **tar.gz** for an extracted bundle.
+**[Download QRiff from GitHub Releases →](https://github.com/Wattos/qriff/releases)**
+
+Choose the **Linux x86_64 AppImage** for a single-file app, or **tar.gz** for an
+extracted bundle. Release bundles run without Rust or a compiler installed.
+Make the AppImage executable and launch it, or extract the archive and run
+`AppRun` inside its folder.
+
+Bundles are built and tested by [GitHub Actions](https://github.com/Wattos/qriff/actions/workflows/linux-release.yml).
 Draft releases remain private until published.
 
 [Install a Linux release bundle →](docs/wiki/Installation.md)
