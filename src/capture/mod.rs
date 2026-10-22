@@ -136,12 +136,22 @@ async fn spectacle_region() -> anyhow::Result<CaptureOutcome> {
 async fn spectacle_region_using(executable: &std::path::Path) -> anyhow::Result<CaptureOutcome> {
     let directory = tempfile::Builder::new().prefix("qr-region-").tempdir()?;
     let path = directory.path().join("region.png");
+    // Isolate selection history from the user's Spectacle instance and settings.
+    // Spectacle has no CLI option to disable restoring the previous rectangle.
+    let config = directory.path().join("config");
+    std::fs::create_dir(&config)?;
+    std::fs::write(
+        config.join("spectaclerc"),
+        "[General]\nrememberSelectionRect=Never\n[GuiConfig]\nselectionRect=0,0,0,0\n",
+    )?;
     let mut child = tokio::process::Command::new(executable)
+        .env("XDG_CONFIG_HOME", &config)
         .args([
             "--background",
             "--nonotify",
             "--region",
             "--release-capture",
+            "--new-instance",
             "--output",
         ])
         .arg(&path)
@@ -313,6 +323,61 @@ mod region_tests {
         assert!(error.to_string().contains("Desktop capture"));
     }
     #[tokio::test]
+    async fn region_capture_starts_empty_in_an_independent_temporary_config() {
+        let fixture = tempfile::tempdir().unwrap();
+        let script = fixture.path().join("spectacle");
+        let arguments = fixture.path().join("arguments");
+        let config_root = fixture.path().join("config-root");
+        let config_copy = fixture.path().join("config-copy");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$@" > '{}'
+printf '%s' "$XDG_CONFIG_HOME" > '{}'
+case "$XDG_CONFIG_HOME" in
+    */qr-region-*/config) ;;
+    *) exit 23 ;;
+esac
+cat "$XDG_CONFIG_HOME/spectaclerc" > '{}'
+# Emulate Spectacle saving a selection; the next scan must not inherit it.
+printf '[GuiConfig]\nselectionRect=20,30,100,200\n' > "$XDG_CONFIG_HOME/spectaclerc"
+exit 0
+"#,
+                arguments.display(),
+                config_root.display(),
+                config_copy.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut previous_config = None;
+        for _ in 0..2 {
+            let outcome = spectacle_region_using(&script).await;
+            let args = std::fs::read_to_string(&arguments).unwrap();
+            assert!(
+                args.lines().any(|arg| arg == "--new-instance"),
+                "the private configuration must not be bypassed by D-Bus forwarding"
+            );
+            assert!(matches!(outcome.unwrap(), CaptureOutcome::Cancelled));
+            let config = std::path::PathBuf::from(std::fs::read_to_string(&config_root).unwrap());
+            assert_eq!(config.file_name().unwrap(), "config");
+            assert!(
+                !config.exists(),
+                "temporary settings must be removed on cancellation"
+            );
+            assert_ne!(
+                previous_config.as_ref(),
+                Some(&config),
+                "each scan needs fresh settings"
+            );
+            previous_config = Some(config);
+            let contents = std::fs::read_to_string(&config_copy).unwrap();
+            assert!(contents.contains("[General]\nrememberSelectionRect=Never\n"));
+            assert!(contents.contains("[GuiConfig]\nselectionRect=0,0,0,0\n"));
+        }
+    }
+    #[tokio::test]
     async fn region_capture_uses_release_selector_private_file_and_removes_it() {
         let fixture = tempfile::tempdir().unwrap();
         let image = fixture.path().join("fixture.png");
@@ -329,17 +394,18 @@ mod region_tests {
         let arguments = std::fs::read_to_string(receipt).unwrap();
         let args: Vec<_> = arguments.lines().collect();
         assert_eq!(
-            &args[..5],
+            &args[..6],
             &[
                 "--background",
                 "--nonotify",
                 "--region",
                 "--release-capture",
+                "--new-instance",
                 "--output"
             ]
         );
         assert!(
-            !std::path::Path::new(args[5]).parent().unwrap().exists(),
+            !std::path::Path::new(args[6]).parent().unwrap().exists(),
             "captured file must be removed after loading"
         );
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();

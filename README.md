@@ -254,6 +254,9 @@ browser, dial or connect to a network.
 
 On KDE, Scan region requires installed **Spectacle** and uses its background
 native selector: drag on the desktop and release to capture, or Escape to cancel.
+Each scan starts with no selected rectangle. Spectacle runs as an independent
+instance with temporary selection settings, leaving your normal Spectacle
+preferences and remembered region untouched.
 The scanner suppresses Spectacle's result window and screenshot notification,
 loads the image from a private temporary folder, and removes the folder after
 loading, failure or cancellation. Selection times out after three minutes.
