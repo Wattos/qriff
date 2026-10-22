@@ -34,7 +34,7 @@ cargo clippy --all-targets -- -D warnings
 A normal launch opens the main window. `--background` starts in the tray when a
 tray host exists, otherwise it opens the window. Closing the last window keeps
 the application alive with a tray host, and exits without one. Losing the tray
-host while hidden opens a window. Show window and Quit are in the tray menu.
+host while hidden opens a window. Open window and Quit are in the tray menu.
 Further launches forward commands to the existing process.
 
 The control socket lives in `$XDG_RUNTIME_DIR/qr-scanner/control.sock`; the runtime
@@ -84,15 +84,20 @@ Settings and the status bar expose the same automatic-copy checkbox.
 This is an Iced approximation of Breeze, not native Qt widgets. It uses desktop
 appearance hints with light/dark fallbacks, native window decorations, and the
 software renderer. Actual native-window fixture screenshots and remaining
-physical checks are in [verification](docs/verification.md#redesigned-interface-verification-2026-10-22).
+physical checks are in [verification](docs/verification.md#tray-overlay-verification-2026-10-22).
 
-Automatically copy single results defaults **off**. When enabled, an accepted
-current-session decode copies only if it introduces one new distinct payload
-and the session still contains exactly one distinct result. A multiple-code
-batch copies nothing automatically. Repeated camera frames never recopy a
-result; after another distinct code appears, choose Copy yourself. Enabling the
-setting does not copy an already displayed result. Starting a new scan resets
-this bookkeeping. Manual Copy always remains available.
+Automatically copy single results defaults **off**. Screen/region detection
+never copies, including a single detected code. In the tray screen overlay, selecting a highlight
+may copy that payload once when the preference is enabled. Selecting the same
+payload again (including another QR with identical bytes) does not recopy it;
+selecting another payload may copy that one once. Changing the preference does
+not copy an already selected result.
+
+Camera decoding retains its single-result policy: a current-session decode
+copies only when it introduces one new distinct payload and the
+session still contains exactly one distinct result. Repeated frames and
+multiple-code batches do not recopy. A new scan resets copy bookkeeping.
+Manual Copy always remains available.
 
 Both copy modes preserve the original UTF-8 QR payload (including a complete
 encoded Wi-Fi payload), or the labeled hexadecimal representation for binary
@@ -204,5 +209,71 @@ permission settings.
 For app-specific permission identification, use the installed desktop launcher.
 A development binary launched directly from a terminal can appear as a generic
 application on older portal versions; do not assume its consent is app-specific.
-The first permission dialog and direct desktop-wide region overlays are separate
-from the recurring capture/options dialog removed by quick capture.
+The first permission dialog remains controlled by the desktop.
+
+### Tray scans and desktop QR selection
+
+Primary activation of the tray icon opens its menu. Choose Scan screen, Scan
+region, Scan camera, Last scan, Open window or Quit. Scan camera opens its preview;
+Open window explicitly opens the ordinary scanner. Screen and region requests
+hide the normal window before capture and do not open it to show results while
+a tray host is available. If the host disappears, the accessible-window fallback
+keeps the application reachable.
+
+Scan screen requests one quick portal screenshot, decodes locally, then shows an
+undecorated fullscreen Iced overlay of the frozen image with dimming and numbered
+QR outlines. This spatial flow requires one unchanged supported display and
+capture dimensions matching its reported physical or logical dimensions within
+one pixel. Multi-output, unavailable/mismatched geometry and changed layouts use
+notifications and Last scan instead of guessing desktop positions. An output
+change during selection closes the overlay safely. KDE Wayland with one
+2560×1600 display at 140% is the first target; other desktops remain unverified.
+
+Click a highlight to open its selectable text and Copy/action panel. Duplicate
+payloads have separate highlights but one retained Last scan entry. Hover
+emphasizes a region. Tab/Shift+Tab cycle detections and panel controls; Enter
+selects the focused detection or activates its focused control. A panel that
+covers a keyboard-focused detection is temporarily hidden to expose that target.
+Clicking background clears selection and consumes the click. Escape clears the
+selected panel first, then closes the overlay. The visible Close control is also
+keyboard reachable. No codes or decode failure produces a concise notification
+without an empty overlay; cancellation returns to the desktop. Repeated scan
+requests are suppressed while capture/decode is pending.
+
+Copy keeps the overlay open. Explicit Open URL, Call or Connect Wi-Fi closes it
+before dispatch, while retaining pending-action suppression and feedback in
+notifications/Last scan. Dismissing the overlay or notification retains results
+and pending actions in memory. A new capture or source change rejects stale
+callbacks. Scanning, hovering, selecting, revealing and copying never launch a
+browser, dial or connect to a network.
+
+On KDE, Scan region requires installed **Spectacle** and uses its background
+native selector: drag on the desktop and release to capture, or Escape to cancel.
+The scanner suppresses Spectacle's result window and screenshot notification,
+loads the image from a private temporary folder, and removes the folder after
+loading, failure or cancellation. Selection times out after three minutes.
+Spectacle does not supply a reliable desktop origin here, so region results use
+a notification and Last scan rather than incorrectly positioned highlights.
+A single region result can offer Copy and its validated action when the
+notification server supports actions; multiple results use a summary.
+On other desktops direct region selection requires Screenshot portal v3 with
+Area support. If unavailable, the scanner reports that limitation; Scan screen
+and explicit Desktop capture… remain available. There is no automatic second
+capture dialog.
+
+Overlay and tray/notification copying needs `wl-copy` from **wl-clipboard** and
+a compositor with Wayland data-control support. Full Copy and Ctrl+C/Cut of a
+text selection both use stdin and a bounded wait, so clipboard ownership can
+survive closing the temporary overlay. Missing/unsupported clipboard access
+produces fixed failure feedback. Actual ownership after dismissal still needs
+physical verification on the target compositor. The normal app window keeps
+its existing Iced clipboard path.
+
+Decoded text in the overlay and main window is read-only and supports mouse
+selection and Ctrl+C for a subset. The Copy button always copies the complete
+original payload. Wi-Fi passwords and malformed Wi-Fi raw data stay masked until
+explicit reveal; hiding them destroys the displayed selectable buffer and its
+selection. Notifications and tray labels never include those secret details.
+Other QR text may appear in notifications, so consider desktop privacy when
+scanning sensitive content. No screenshot history, QR payloads or camera images
+are saved; Last scan is in-memory only.

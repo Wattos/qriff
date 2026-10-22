@@ -1,8 +1,9 @@
 # Verification and release measurements
 
-Current redesigned-interface evidence is recorded in the dated section below.
-All 2026-10-18/19 measurements and counts in the following original report are
-**historical**, not measurements of the redesigned build.
+Current tray-overlay evidence is recorded in the final dated section below.
+Earlier benchmark numbers, test counts and native probes are **historical**
+evidence for their stated source baselines; they are not measurements of the
+current tray-overlay build.
 
 2026-10-18, KDE neon 24.04, Plasma Wayland; Intel Core Ultra 7 265H
 (16 logical CPUs), 62.2 GiB RAM; Intel Arrow Lake-P graphics plus NVIDIA
@@ -90,7 +91,7 @@ the measurements above remain historical short observations.
 `desktop-file-validate assets/qr-scanner.desktop` passed. The SVG icon and entry
 are delivery assets; their installed launcher appearance remains unverified.
 
-## KDE acceptance status
+## Historical KDE acceptance status (2026-10-18/19)
 
 “Passed (automated/probe)” is mechanical evidence and does not imply a physical
 click or visual acceptance. Prior task probes used this same desktop.
@@ -150,8 +151,9 @@ quick capture on the installed KDE portal remain to be checked by the user.
 
 ## Redesigned interface verification (2026-10-22)
 
-Verified the redesigned default tiny-skia build on KDE neon / Plasma Wayland.
-The source baseline was `b93a072`; this delivery updates documentation only.
+Earlier verification of the redesigned default tiny-skia build on KDE neon /
+Plasma Wayland used source baseline `b93a072`. The counts, lifecycle probes and
+resource sample in this section describe that earlier build.
 No packages were installed. Fresh required commands, all exit 0:
 
 ```sh
@@ -203,7 +205,7 @@ live system appearance changes, and dimensions smaller than the captured narrow
 window remain unverified. The appearance is a Breeze-style Iced approximation,
 not native Qt rendering.
 
-### Current isolated native smoke and resources
+### Earlier isolated native smoke and resources
 
 The release probe used a private 0700 temporary `XDG_RUNTIME_DIR` **and** private
 `XDG_CONFIG_HOME`, an absolute Wayland socket, and the existing session bus.
@@ -252,3 +254,96 @@ dragging/Escape/mixed DPI, physical QR acceptance, camera LED/unplug behavior,
 and installed launcher appearance remain physical acceptance gaps. All GNOME,
 Hyprland and Sway checks in the original checklist remain unverified. Automated
 coverage and native fixture screenshots do not imply those checks passed.
+
+## Tray overlay verification (2026-10-22)
+
+The integrated source baseline is `4a635ac`, after Tasks 1–5 and their reviewed
+fixes. The default renderer remains tiny-skia. No packages were installed and no
+historical performance benchmark was rerun. Current required checks and results:
+
+```sh
+cargo fmt --check
+cargo clippy --offline --all-targets -- -D warnings
+cargo test --offline
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools -p 'test_*.py'
+cargo build --offline --release
+git diff --check
+```
+
+Formatting, Clippy (all targets, warnings denied), the full Rust suite, Python,
+release build and diff check all exited 0. Rust passed **156 unit + 19
+integration tests (175 total)**; main/doc targets contain zero tests. Python
+passed **1** runtime-probe regression. Cargo used the shared checkout target
+directory. A local-link check resolved **22** Markdown file/anchor links across
+README and this document; all four new PNGs passed signature, dimensions, chunk
+CRC and decompression checks and were visually inspected.
+
+### Integrated native overlay evidence
+
+A temporary native Iced daemon injected a deterministic 2560×1600 synthetic
+captured image into the real `InstanceCommand(ScanScreen)` / `CaptureFinished`
+controller route. The portal task was dropped without polling. The real bounded
+spatial worker decoded five QR regions into four distinct payloads, including two
+identical URL codes; `SpatialFinished` opened the real controller-owned fullscreen
+surface. The real read-only Wayland layout observer reported one `eDP-1` output:
+2560×1600 physical, 1829×1143 logical, position [0,0], transform 0. The actual
+native surface reported 1829.2858×1142.8572 logical pixels at scale 1.4. Its
+2561×1600 output reflects native fractional rounding within the accepted pixel
+tolerance. Outlines aligned with the synthetic QR bounds across this surface.
+
+Captures use the same live window renderer immediately after its actual
+`Widget::draw`, via `iced::advanced::renderer::Headless::screenshot`. Despite that
+trait's name, no separate headless widget tree was constructed. Iced's ordinary
+`window::screenshot` rerender loses editor glyphs after layout updates; the
+immediate native-draw route preserves the displayed text. These are actual Iced
+surfaces with safe synthetic pixels, not browser mockups or screenshots of an
+unrelated desktop. The temporary source was removed before final checks; no
+fixture switch is shipped.
+
+| Controller state | Native evidence |
+| --- | --- |
+| Initial five highlights, no selection or automatic copy | [Initial](screenshots/overlay-integrated-initial.png) |
+| Selected long text with the visible partial selection “Selectable” | [Selected text](screenshots/overlay-integrated-selected-text.png) |
+| Selected Wi-Fi with its synthetic password masked | [Masked Wi-Fi](screenshots/overlay-integrated-wifi-masked.png) |
+| Bottom-right code with its action panel clamped inside the surface | [Edge panel](screenshots/overlay-integrated-edge-panel.png) |
+
+Native selection/text events were driven through guarded controller messages.
+Auto-copy stayed off and no Copy or external-action effect ran. Each fixture
+closed only its own overlay through `OverlayEvent(Close)` and received the real
+native `WindowClosed` acknowledgement. Assertions checked that the overlay,
+screenshot and retired-window resources were gone, no ordinary windows existed,
+and four results remained in both controller memory and the published Last scan
+snapshot. The fixture then exited successfully. Tray-host availability was fixture
+state; this proves integrated close/retention without claiming a physical tray
+interaction or a newly verified StatusNotifierItem registration.
+
+The eight earlier [overlay model captures](screenshots/overlay-native-several-hover.png)
+remain narrower native view evidence for single/rotated/hover/reveal states;
+the four captures above exercise the final controller integration. The earlier
+normal-window screenshots in this document remain historical layout evidence.
+
+### Automated coverage and remaining acceptance
+
+Rust coverage includes spatial/rotated/duplicate decoding, 1.4-scale and
+letterboxed transforms, hit testing and edge clamping, unsupported/changed output
+layouts, visible keyboard detection focus, read-only partial selection and Wi-Fi
+buffer destruction, once-per-selected-payload copying, session/window guards,
+close retention, deferred action dispatch after native close acknowledgement,
+and ordinary desktop/camera workflow preservation. Private D-Bus tests verify
+notifications, markup and stale action delivery. Fake executable tests verify
+Spectacle arguments, private image cleanup and exact wl-copy stdin. Controller
+copy tests use a side-effect-free writer and verify the current guarded selection.
+These tests do not modify the real clipboard or execute real QR actions.
+
+Physical mouse/keyboard selection and hover, text dragging/Ctrl+C, clipboard
+ownership after overlay dismissal, portal screenshot-to-desktop alignment,
+first-use permission and repeated quick capture, Spectacle drag/release/Escape,
+notification buttons and physical tray activation remain **unverified**. Native
+fixtures establish synthetic image/highlight alignment; they do not establish
+actual portal capture alignment with desktop content. Browser/telephone handoff,
+NetworkManager authorization/authentication/profile lifetime, camera QR/LED/unplug,
+and installed launcher appearance remain the earlier manual gaps. GNOME,
+Hyprland, Sway, multi-output and other scale/rotation combinations have no new
+native acceptance. No real desktop/camera capture, clipboard write, browser,
+telephone, Wi-Fi action, preference write or existing-instance IPC was used for
+this delivery evidence.
