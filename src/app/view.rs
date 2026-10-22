@@ -33,7 +33,7 @@ fn auto_copy(app: &App, target: Target) -> Element<'_, Message> {
     let focused = app.focus == Some(target);
     container(
         checkbox(app.preferences.auto_copy_single)
-            .label("Automatically copy single results")
+            .label("Auto-copy camera and selected codes")
             .size(15)
             .text_size(12)
             .on_toggle(Message::AutoCopyChanged),

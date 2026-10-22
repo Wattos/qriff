@@ -362,3 +362,18 @@ Hyprland, Sway, multi-output and other scale/rotation combinations have no new
 native acceptance. No real desktop/camera capture, clipboard write, browser,
 telephone, Wi-Fi action, preference write or existing-instance IPC was used for
 this delivery evidence.
+
+### Single-code screen shortcut (2026-10-22)
+
+Scan screen with one decoded QR location now bypasses the overlay and copies the
+exact display payload through the windowless clipboard backend, independent of
+the optional camera/selection auto-copy setting and display-layout eligibility.
+Multiple physical locations still use the existing chooser, even if their payloads
+are identical. Region scanning and camera policy are unchanged.
+
+Controller regressions use a side-effect-free writer for URL, Wi-Fi and binary
+payloads; enabled/disabled preferences and known/unavailable layouts; successful
+and failed copy feedback; retained Last scan results; and stale/duplicate decode
+completion suppression. Existing overlay lifecycle tests now use multiple
+locations, including the real spatial-worker synthetic fixture with two QR codes.
+No new physical clipboard or native-input acceptance is claimed.

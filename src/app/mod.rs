@@ -567,7 +567,7 @@ impl App {
                     && !self.capture_in_progress()
                     && self.pending_spatial.is_none()
                 {
-                    self.windowless = false;
+                    self.windowless = matches!(c, Command::ScanScreen);
                 }
                 self.command(c)
             }

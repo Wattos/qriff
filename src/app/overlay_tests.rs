@@ -2,7 +2,7 @@ use super::tests::capture_tests::app;
 use super::*;
 
 #[test]
-fn screen_decode_never_copies_before_explicit_selection() {
+fn legacy_nonspatial_screen_decode_does_not_trigger_auto_copy() {
     let mut app = app();
     app.preferences.auto_copy_single = true;
     app.windowless = true;
@@ -74,10 +74,17 @@ fn scan() -> Arc<crate::decode::SpatialScan> {
         results: vec![crate::results::QrResult::from_payload(
             b"https://example.org".to_vec(),
         )],
-        detections: vec![crate::decode::Detection {
-            result_index: 0,
-            corners: [[20., 20.], [120., 20.], [120., 120.], [20., 120.]],
-        }],
+        // Existing overlay tests exercise multiple locations of one payload.
+        detections: vec![
+            crate::decode::Detection {
+                result_index: 0,
+                corners: [[20., 20.], [120., 20.], [120., 120.], [20., 120.]],
+            },
+            crate::decode::Detection {
+                result_index: 0,
+                corners: [[200., 20.], [300., 20.], [300., 120.], [200., 120.]],
+            },
+        ],
     })
 }
 fn captured(app: &mut App, mode: Command) -> crate::jobs::JobId {
@@ -708,7 +715,12 @@ async fn captured_synthetic_qr_runs_spatial_worker_and_releases_image_on_close()
         .render::<image::Luma<u8>>()
         .module_dimensions(8, 8)
         .build();
-    let size = [qr.width(), qr.height()];
+    // Two physical codes retain the spatial chooser even with one payload.
+    let mut canvas =
+        image::GrayImage::from_pixel(qr.width() * 2 + 20, qr.height(), image::Luma([255]));
+    image::imageops::replace(&mut canvas, &qr, 0, 0);
+    image::imageops::replace(&mut canvas, &qr, i64::from(qr.width() + 20), 0);
+    let size = [canvas.width(), canvas.height()];
     drop(
         app.update(Message::LayoutChanged(crate::display::LayoutState::Ready(
             crate::display::Layout {
@@ -727,7 +739,7 @@ async fn captured_synthetic_qr_runs_spatial_worker_and_releases_image_on_close()
     drop(app.update(Message::InstanceCommand(Command::ScanScreen))); // portal task never polled
     let session = crate::jobs::JobId(app.state.session);
     let image = Arc::new(crate::capture::Prepared::new(
-        image::DynamicImage::ImageLuma8(qr),
+        image::DynamicImage::ImageLuma8(canvas),
     ));
     let weak = Arc::downgrade(&image);
     let task = app.update(Message::CaptureFinished(session, Ok(Some(image))));
@@ -1030,4 +1042,212 @@ async fn expected_region_failures_retain_actionable_guidance_in_state_and_notifi
             message
         );
     }
+}
+
+#[tokio::test]
+async fn lone_screen_code_copies_without_overlay_regardless_of_preference_or_layout() {
+    use iced::futures::StreamExt;
+    for enabled in [false, true] {
+        for available in [false, true] {
+            for payload in [
+                b"https://example.org".as_slice(),
+                b"WIFI:T:WPA;S:test;P:private;;",
+                b"\xff\x00",
+            ] {
+                let mut app = app();
+                app.preferences.auto_copy_single = enabled;
+                if available {
+                    drop(app.update(Message::LayoutChanged(layout(7))));
+                }
+                let session = captured(&mut app, Command::ScanScreen);
+                let revision = if available { 7 } else { 0 };
+                let mut scan = (*scan()).clone();
+                scan.detections.truncate(1);
+                scan.results = vec![crate::results::QrResult::from_payload(payload.to_vec())];
+                let expected = scan.results[0].display_text.clone();
+                let mut copied = vec![];
+                let task = app.spatial_finished_with_copy(
+                    session,
+                    revision,
+                    Ok(Arc::new(scan)),
+                    |app, text, session, index| {
+                        app.copy_task_with(text, session, index, |text| {
+                            copied.push(text);
+                            async { Ok(()) }
+                        })
+                    },
+                );
+                assert!(
+                    app.overlay.is_none(),
+                    "a lone code must not open the chooser"
+                );
+                assert!(app.state.window_ids.is_empty());
+                assert!(app.screenshot.is_none());
+                assert!(app.capture_layout.is_none());
+                assert_eq!(copied, vec![expected]);
+                let mut stream = iced_runtime::task::into_stream(task).unwrap();
+                while let Some(action) = stream.next().await {
+                    match action {
+                        iced_runtime::Action::Output(message @ Message::ClipboardFinished(..)) => {
+                            drop(app.update(message));
+                        }
+                        _ => panic!("single result must only perform a windowless copy"),
+                    }
+                }
+                let snapshot = app.desktop.borrow();
+                assert_eq!(snapshot.results.len(), 1);
+                assert_eq!(
+                    snapshot.notification.as_ref().unwrap().title,
+                    "QR code copied"
+                );
+                assert!(
+                    !snapshot
+                        .notification
+                        .as_ref()
+                        .unwrap()
+                        .body
+                        .contains("private")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn multiple_screen_locations_keep_chooser_without_automatic_copy() {
+    for distinct in [false, true] {
+        let mut app = app();
+        app.preferences.auto_copy_single = true;
+        drop(app.update(Message::LayoutChanged(layout(7))));
+        let session = captured(&mut app, Command::ScanScreen);
+        let mut scan = (*scan()).clone();
+        scan.detections.truncate(1);
+        let mut other = scan.detections[0].clone();
+        other.corners = [[200., 20.], [300., 20.], [300., 120.], [200., 120.]];
+        if distinct {
+            scan.results
+                .push(crate::results::QrResult::from_payload(b"other".to_vec()));
+            other.result_index = 1;
+        }
+        scan.detections.push(other);
+        drop(
+            app.spatial_finished_with_copy(session, 7, Ok(Arc::new(scan)), |_, _, _, _| {
+                panic!("multiple locations require explicit selection before copying")
+            }),
+        );
+        assert!(app.overlay.is_some());
+        assert!(app.state.window_ids.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn single_screen_copy_failure_keeps_results_and_reports_failure_without_a_window() {
+    use iced::futures::StreamExt;
+    let mut app = app();
+    let session = captured(&mut app, Command::ScanScreen);
+    let mut single = (*scan()).clone();
+    single.detections.truncate(1);
+    let task = app.spatial_finished_with_copy(
+        session,
+        0,
+        Ok(Arc::new(single)),
+        |app, text, session, index| {
+            app.copy_task_with(text, session, index, |_| async {
+                Err(clipboard::ClipboardUnavailable)
+            })
+        },
+    );
+    let mut stream = iced_runtime::task::into_stream(task).unwrap();
+    while let Some(action) = stream.next().await {
+        if let iced_runtime::Action::Output(message @ Message::ClipboardFinished(..)) = action {
+            drop(app.update(message));
+        } else {
+            panic!("copy failure must not open a window");
+        }
+    }
+    assert!(app.overlay.is_none());
+    assert!(app.state.window_ids.is_empty());
+    let snapshot = app.desktop.borrow();
+    assert_eq!(snapshot.results.len(), 1);
+    assert_eq!(
+        snapshot.notification.as_ref().unwrap().title,
+        "Could not copy QR code"
+    );
+}
+
+#[test]
+fn stale_or_duplicate_single_screen_completion_never_copies() {
+    let mut app = app();
+    let session = captured(&mut app, Command::ScanScreen);
+    let mut single = (*scan()).clone();
+    single.detections.truncate(1);
+    let single = Arc::new(single);
+    let mut copies = 0;
+    drop(
+        app.spatial_finished_with_copy(session, 0, Ok(single.clone()), |_, _, _, _| {
+            copies += 1;
+            Task::none()
+        }),
+    );
+    assert_eq!(copies, 1);
+    drop(
+        app.spatial_finished_with_copy(session, 0, Ok(single.clone()), |_, _, _, _| {
+            panic!("duplicate completion must not copy twice")
+        }),
+    );
+    let _new = captured(&mut app, Command::ScanScreen);
+    drop(
+        app.spatial_finished_with_copy(session, 0, Ok(single), |_, _, _, _| {
+            panic!("stale completion must not copy into a new session")
+        }),
+    );
+}
+
+#[test]
+fn app_button_screen_scan_uses_spatial_results_and_notification_mode() {
+    let mut app = app();
+    app.state.host_available = true;
+    let window = window::Id::unique();
+    app.state.window_ids.push(window);
+    app.state.windows = 1;
+    drop(app.update(Message::UserCommand(Command::ScanScreen)));
+    assert!(
+        app.windowless,
+        "Scan screen must use the same shortcut from the app button"
+    );
+    assert!(app.state.window_ids.is_empty());
+    drop(app.update(Message::WindowClosed(window)));
+    let session = crate::jobs::JobId(app.state.session);
+    drop(app.update(Message::CaptureFinished(
+        session,
+        Ok(Some(Arc::new(crate::capture::Prepared::new(
+            image::DynamicImage::new_rgb8(20, 20),
+        )))),
+    )));
+    assert_eq!(app.pending_spatial, Some((session, 0)));
+    assert!(app.state.window_ids.is_empty());
+    let mut single = (*scan()).clone();
+    single.detections.truncate(1);
+    let mut copies = 0;
+    drop(app.spatial_finished_with_copy(
+        session,
+        0,
+        Ok(Arc::new(single)),
+        |app, text, session, index| {
+            app.copy_task_with(text, session, index, |_| {
+                copies += 1;
+                async { Ok(()) }
+            })
+        },
+    ));
+    assert_eq!(
+        copies, 1,
+        "the app button must use the persistent clipboard backend"
+    );
+    drop(app.update(Message::ClipboardFinished(session, 0, Ok(()))));
+    assert_eq!(
+        app.desktop.borrow().notification.as_ref().unwrap().title,
+        "QR code copied"
+    );
+    assert!(app.overlay.is_none());
 }

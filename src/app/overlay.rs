@@ -63,6 +63,15 @@ impl App {
         revision: u64,
         result: Result<Arc<crate::decode::SpatialScan>, String>,
     ) -> Task<Message> {
+        self.spatial_finished_with_copy(id, revision, result, Self::copy_task)
+    }
+    pub(super) fn spatial_finished_with_copy(
+        &mut self,
+        id: JobId,
+        revision: u64,
+        result: Result<Arc<crate::decode::SpatialScan>, String>,
+        copy: impl FnOnce(&Self, String, JobId, usize) -> Task<Message>,
+    ) -> Task<Message> {
         if id.0 != self.state.session || self.pending_spatial != Some((id, revision)) {
             return Task::none();
         }
@@ -76,6 +85,15 @@ impl App {
             Ok(scan) => {
                 self.state.results = scan.results.clone();
                 self.state.error = None;
+                // A single screen target needs no chooser, even when optional
+                // selection/camera auto-copy is disabled. Count locations so
+                // duplicate payloads at different positions still get a chooser.
+                if self.capture_mode == crate::capture::CaptureMode::Quick
+                    && scan.results.len() == 1
+                    && scan.detections.len() == 1
+                {
+                    return copy(self, scan.results[0].display_text.clone(), id, 0);
+                }
                 if !scan.results.is_empty() {
                     if self.capture_mode == crate::capture::CaptureMode::Region {
                         self.overlay_fallback = Some(REGION_FALLBACK);

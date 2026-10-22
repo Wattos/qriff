@@ -86,9 +86,14 @@ appearance hints with light/dark fallbacks, native window decorations, and the
 software renderer. Actual native-window fixture screenshots and remaining
 physical checks are in [verification](docs/verification.md#tray-overlay-verification-2026-10-22).
 
-Automatically copy single results defaults **off**. Screen/region detection
-never copies, including a single detected code. In the tray screen overlay, selecting a highlight
-may copy that payload once when the preference is enabled. Selecting the same
+Scan screen automatically copies a lone detected QR code and shows a notification,
+without opening a selection overlay. This shortcut applies even when the optional
+auto-copy preference is off. Multiple QR locations open the chooser, including
+codes with identical contents. Copy failures keep the result in Last scan.
+
+Automatically copy single results defaults **off** for camera/selection behavior.
+Region detection does not automatically copy. In the multi-code screen overlay,
+selecting a highlight may copy that payload once when the preference is enabled. Selecting the same
 payload again (including another QR with identical bytes) does not recopy it;
 selecting another payload may copy that one once. Changing the preference does
 not copy an already selected result.
@@ -220,9 +225,10 @@ hide the normal window before capture and do not open it to show results while
 a tray host is available. If the host disappears, the accessible-window fallback
 keeps the application reachable.
 
-Scan screen requests one quick portal screenshot, decodes locally, then shows an
-undecorated fullscreen Iced overlay of the frozen image with dimming and numbered
-QR outlines. This spatial flow requires one unchanged supported display and
+Scan screen requests one quick portal screenshot and decodes locally. A lone QR
+code is copied immediately, with notification feedback and actions in Last scan.
+Only multiple QR locations show an undecorated fullscreen Iced overlay of the
+frozen image with dimming and numbered QR outlines. This spatial flow requires one unchanged supported display and
 capture dimensions matching its reported physical or logical dimensions within
 one pixel. Multi-output, unavailable/mismatched geometry and changed layouts use
 notifications and Last scan instead of guessing desktop positions. An output
