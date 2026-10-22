@@ -234,8 +234,9 @@ payloads have separate highlights but one retained Last scan entry. Hover
 emphasizes a region. Tab/Shift+Tab cycle detections and panel controls; Enter
 selects the focused detection or activates its focused control. A panel that
 covers a keyboard-focused detection is temporarily hidden to expose that target.
-Close moves to a clear corner when possible. In a crowded layout it can hide
-while a detection has keyboard focus, then returns when Tab reaches Close.
+Close moves to a corner clear of the visible action panel. In a crowded layout
+it can hide to uncover a focused detection or panel controls, then returns when
+Tab reaches Close.
 Clicking background clears selection and consumes the click. Escape clears the
 selected panel first, then closes the overlay. The visible Close control is also
 keyboard reachable. No codes or decode failure produces a concise notification

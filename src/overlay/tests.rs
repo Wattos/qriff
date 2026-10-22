@@ -490,3 +490,66 @@ fn crowded_close_position_is_hidden_for_detection_focus_and_restored_for_keyboar
     assert!(m.close_bounds(viewport).is_some());
     assert_eq!(m.update(Event::ActivateFocused, true), Effect::Dismiss);
 }
+
+#[test]
+fn relocated_close_keeps_low_left_panel_and_copy_focus_unobstructed() {
+    let mut m = model(&["plain"], &[0, 0, 0, 0]);
+    m.frozen = Arc::new(Prepared::new(image::DynamicImage::new_rgba8(800, 600)));
+    let viewport = Size::new(800., 600.);
+    m.resize(viewport);
+    for (detection, (x, y)) in
+        m.scan
+            .detections
+            .iter_mut()
+            .zip([(680., 18.), (680., 560.), (20., 18.), (20., 240.)])
+    {
+        detection.corners = [[x, y], [x + 15., y], [x + 15., y + 15.], [x, y + 15.]];
+    }
+    assert_eq!(m.update(Event::Select(3), false), Effect::None);
+    let panel = m.panel_bounds(viewport).unwrap();
+    assert_eq!(
+        panel,
+        iced::Rectangle {
+            x: 12.,
+            y: 263.,
+            width: 380.,
+            height: 330.
+        }
+    );
+    assert_eq!(m.focus(), Some(Focus::Text));
+    assert!(!m.close_bounds(viewport).unwrap().intersects(&panel));
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Copy));
+    assert!(!m.close_bounds(viewport).unwrap().intersects(&panel));
+    assert_eq!(m.update(Event::ActivateFocused, false), Effect::Copy(0));
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Close));
+    assert!(!m.close_bounds(viewport).unwrap().intersects(&panel));
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Detection(0)));
+    let highlight =
+        geometry::highlight_bounds(&m.scan.detections[0], &m.transform().unwrap(), viewport);
+    assert!(
+        !m.close_bounds(viewport)
+            .is_some_and(|close| close.intersects(&highlight))
+    );
+    m.update(Event::Next(true), false);
+    assert_eq!(m.focus(), Some(Focus::Close));
+    assert_eq!(m.update(Event::ActivateFocused, false), Effect::Dismiss);
+}
+
+#[test]
+fn viewport_filling_panel_uncovering_preserves_copy_and_keyboard_close() {
+    let mut m = model(&["plain"], &[0]);
+    let viewport = Size::new(100., 80.);
+    m.resize(viewport);
+    m.update(Event::Select(0), false);
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Copy));
+    assert!(m.close_bounds(viewport).is_none());
+    assert_eq!(m.update(Event::ActivateFocused, false), Effect::Copy(0));
+    m.update(Event::Next(false), false);
+    assert_eq!(m.focus(), Some(Focus::Close));
+    assert!(m.close_bounds(viewport).is_some());
+    assert_eq!(m.update(Event::ActivateFocused, false), Effect::Dismiss);
+}

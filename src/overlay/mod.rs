@@ -176,14 +176,18 @@ impl Model {
                 geometry::highlight_bounds(detection, &transform, viewport).intersects(bounds)
             })
         };
-        // Prefer a stable corner that leaves every detection pointer-accessible.
+        let panel = self.panel_bounds(viewport);
+        let clears_panel =
+            |bounds: &iced::Rectangle| panel.is_none_or(|panel| !panel.intersects(bounds));
+        // Prefer a stable corner that leaves detections and panel controls accessible.
         if let Some(bounds) = candidates.iter().find(|bounds| {
-            !self
-                .scan
-                .detections
-                .iter()
-                .enumerate()
-                .any(|(i, _)| overlaps(i, bounds))
+            clears_panel(bounds)
+                && !self
+                    .scan
+                    .detections
+                    .iter()
+                    .enumerate()
+                    .any(|(i, _)| overlaps(i, bounds))
         }) {
             return Some(*bounds);
         }
@@ -192,9 +196,15 @@ impl Model {
         if let Some(Focus::Detection(index)) = self.focus {
             return candidates
                 .into_iter()
-                .find(|bounds| !overlaps(index, bounds));
+                .find(|bounds| clears_panel(bounds) && !overlaps(index, bounds));
         }
-        Some(candidates[0])
+        // If every clear corner covers a detection, preserve the visible panel.
+        // A viewport-filling panel may leave no room: hide Close until its own
+        // keyboard target is focused, rather than obscuring Copy or its focus ring.
+        candidates
+            .into_iter()
+            .find(clears_panel)
+            .or_else(|| (self.focus == Some(Focus::Close)).then_some(candidates[0]))
     }
     fn panel_bounds(&self, viewport: Size) -> Option<iced::Rectangle> {
         let detection = self.scan.detections.get(self.selected?)?;

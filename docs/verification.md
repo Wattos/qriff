@@ -343,6 +343,12 @@ controller state and notifications; arbitrary provider diagnostics remain redact
 These tests do not modify the real clipboard or execute real QR actions. The
 native PNGs above predate the final Close-placement change; its new placement has
 automated geometry/model coverage, not additional native or physical acceptance.
+A subsequent narrow Close/panel collision correction passes **23 overlay tests**
+and the full **167 unit + 19 integration tests (186 total)**, plus formatting,
+diff checks and Clippy. Its exact occupied-corners/low-left-panel regression
+checks unobstructed Copy focus; a viewport-filling panel case checks Close
+restoration by keyboard. Release/Python evidence above is from the preceding
+consolidated fix, before this geometry-only correction.
 
 Physical mouse/keyboard selection and hover, text dragging/Ctrl+C, clipboard
 ownership after overlay dismissal, portal screenshot-to-desktop alignment,
