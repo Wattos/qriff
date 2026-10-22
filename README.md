@@ -112,7 +112,7 @@ Published versions are available on the [Releases page](https://github.com/Watto
 choose **AppImage** for a single-file app, or **tar.gz** for an extracted bundle.
 Draft releases remain private until published.
 
-[Run a Linux bundle →](docs/usage.md#linux-bundles)
+[Install a Linux release bundle →](docs/wiki/Installation.md)
 
 To build from source, use stable Rust and the native dependencies below.
 
