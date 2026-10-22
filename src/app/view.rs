@@ -43,7 +43,7 @@ fn auto_copy(app: &App, target: Target) -> Element<'_, Message> {
     .into()
 }
 /// Display text deliberately excludes encoded Wi-Fi credentials, including malformed Wi-Fi.
-pub(super) fn payload(result: &crate::results::QrResult, reveal: bool) -> String {
+pub(crate) fn payload(result: &crate::results::QrResult, reveal: bool) -> String {
     match &result.content {
         QrContent::Wifi(network) => {
             if reveal && let Some(password) = &network.password {

@@ -3,8 +3,8 @@ pub mod clipboard;
 mod focus;
 mod icons;
 pub mod state;
-mod style;
-mod view;
+pub(crate) mod style;
+pub(crate) mod view;
 use crate::{
     cli::Command,
     instance::{InstanceRole, Primary},
