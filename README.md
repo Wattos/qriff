@@ -11,7 +11,7 @@
   <p>
     <a href="#get-started"><strong>Get started</strong></a> ·
     <a href="#features">Features</a> ·
-    <a href="#see-it-in-action">Screenshots</a> ·
+    <a href="#see-it-in-action">See it in action</a> ·
     <a href="docs/usage.md">Documentation</a> ·
     <a href="https://github.com/Wattos/qriff/issues">Report a bug</a>
   </p>
@@ -20,10 +20,14 @@
   <p><sub>Scan, read, and act. Native app screenshots use sample QR data.</sub></p>
 </div>
 
-That QR code in a browser, a presentation, or a video call shouldn’t need a
-second device. **QRiff reads it right where it is.** Scan your screen, draw around
-an area, or point your camera at a printed code. Copy the contents, open a link,
-or join a Wi-Fi network when you choose.
+Ever spotted a QR code on your desktop and reached for your phone just to
+scan it? A link in your browser, a presentation, or a video call shouldn’t
+require another device or a screenshot uploaded to a website.
+
+**Finally, a quick and simple way to scan QR codes on your desktop.**
+QRiff reads them right where they are. Scan your screen or draw around a code,
+then copy its contents, open a link, or join a Wi-Fi network. You can also point
+your camera at a printed code.
 
 QRiff lives in your tray, decodes locally, and keeps your latest results close
 without filling your desktop with windows.
@@ -48,6 +52,14 @@ without filling your desktop with windows.
   scan results in memory instead of building a persistent scan history.
 
 ## See it in action
+
+From the tray to your clipboard: scan a single code instantly, or choose among
+multiple codes highlighted on your desktop.
+
+<p align="center">
+  <img src="docs/screenshots/qriff-demo.gif" width="1040" alt="QRiff screencast showing a tray screen scan copying a single QR code with a notification, followed by selecting and copying one of several highlighted QR codes" />
+</p>
+
 
 ### Pick the right code, right on your desktop
 
