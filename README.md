@@ -16,7 +16,7 @@
     <a href="https://github.com/Wattos/qriff/issues">Report a bug</a>
   </p>
   <br />
-  <img src="docs/screenshots/native-multiple-light.png" width="1040" alt="QRiff’s desktop window showing website, Wi-Fi and text results, with Copy, Open URL and Connect to Wi-Fi actions" />
+  <img src="docs/screenshots/native-multiple-dark.png" width="1040" alt="QRiff’s desktop window showing website, Wi-Fi and text results, with Copy, Open URL and Connect to Wi-Fi actions" />
   <p><sub>Scan, read, and act. Native app screenshots use sample QR data.</sub></p>
 </div>
 
@@ -134,7 +134,9 @@ Then open the tray menu:
 | **Last scan** | Revisit the latest results and their actions |
 | **Open window** | Open the full scanner interface |
 
-Run `cargo run --release` to start with the main window instead. For a launcher,
+Run `cargo run --release` to start with the main window instead. Its **Scan
+screen** button keeps the captured image and results in the window; the tray
+menu uses the windowless copy-or-choose flow. For a launcher,
 icons, and the `qriff` command in your application menu, follow the
 [installation guide](docs/usage.md#build-and-run).
 

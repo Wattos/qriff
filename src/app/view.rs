@@ -299,6 +299,8 @@ fn source(app: &App) -> Element<'_, Message> {
                 .width(Length::Fill)
                 .height(if wide(app.width) { 220 } else { 140 }),
             )
+            .padding(8)
+            .clip(true)
             .style(style::card),
         );
         pane = pane.push(

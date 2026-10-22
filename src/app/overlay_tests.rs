@@ -1204,50 +1204,38 @@ fn stale_or_duplicate_single_screen_completion_never_copies() {
 }
 
 #[test]
-fn app_button_screen_scan_uses_spatial_results_and_notification_mode() {
+fn app_button_screen_scan_retains_capture_and_results_in_window() {
     let mut app = app();
     app.state.host_available = true;
+    app.windowless = true; // A previous tray scan must not leak its mode.
     let window = window::Id::unique();
     app.state.window_ids.push(window);
     app.state.windows = 1;
     drop(app.update(Message::UserCommand(Command::ScanScreen)));
-    assert!(
-        app.windowless,
-        "Scan screen must use the same shortcut from the app button"
-    );
-    assert!(app.state.window_ids.is_empty());
+    assert!(!app.windowless, "the app button must use the window flow");
     drop(app.update(Message::WindowClosed(window)));
     let session = crate::jobs::JobId(app.state.session);
-    drop(app.update(Message::CaptureFinished(
-        session,
-        Ok(Some(Arc::new(crate::capture::Prepared::new(
-            image::DynamicImage::new_rgb8(20, 20),
-        )))),
-    )));
-    assert_eq!(app.pending_spatial, Some((session, 0)));
-    assert!(app.state.window_ids.is_empty());
-    let mut single = (*scan()).clone();
-    single.detections.truncate(1);
-    let mut copies = 0;
-    drop(app.spatial_finished_with_copy(
-        session,
-        0,
-        Ok(Arc::new(single)),
-        |app, text, session, index| {
-            app.copy_task_with(text, session, index, |_| {
-                copies += 1;
-                async { Ok(()) }
-            })
-        },
+    let image = Arc::new(crate::capture::Prepared::new(
+        image::DynamicImage::new_rgb8(20, 20),
     ));
+    drop(app.update(Message::CaptureFinished(session, Ok(Some(image.clone())))));
+    assert!(Arc::ptr_eq(app.screenshot.as_ref().unwrap(), &image));
+    assert!(app.pending_spatial.is_none());
+    assert_eq!(app.state.windows, 1, "the window reopens after capture");
+    let session = crate::jobs::JobId(app.state.session);
+    let task = app.update(Message::DecodeFinished(Arc::new(
+        crate::jobs::DecodeOutcome {
+            id: session,
+            result: Ok(scan().results.clone()),
+        },
+    )));
     assert_eq!(
-        copies, 1,
-        "the app button must use the persistent clipboard backend"
+        task.units(),
+        0,
+        "default window scan must not copy automatically"
     );
-    drop(app.update(Message::ClipboardFinished(session, 0, Ok(()))));
-    assert_eq!(
-        app.desktop.borrow().notification.as_ref().unwrap().title,
-        "QR code copied"
-    );
+    assert_eq!(app.state.results.len(), 1);
+    assert!(app.screenshot.is_some());
     assert!(app.overlay.is_none());
+    assert!(app.desktop.borrow().notification.is_none());
 }

@@ -105,6 +105,20 @@ fn mixed_version_screen_recovers_every_location_without_duplicate_highlights() {
         );
         expected.push((payload, tile_x, tile_y));
     }
+    let decoder = qr_scanner::jobs::Decoder::new();
+    let mut outcomes = decoder.subscribe();
+    decoder.submit_screen(qr_scanner::jobs::JobId(1), canvas.clone());
+    let outcome = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), outcomes.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(
+        outcome.result.as_ref().unwrap().len(),
+        6,
+        "window screen scans must use the robust retry too"
+    );
     let scan = decode::decode_spatial(&canvas).unwrap();
     assert_eq!(
         scan.results.len(),

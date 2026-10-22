@@ -578,7 +578,7 @@ impl App {
                     && !self.capture_in_progress()
                     && self.pending_spatial.is_none()
                 {
-                    self.windowless = matches!(c, Command::ScanScreen);
+                    self.windowless = false;
                 }
                 self.command(c)
             }
@@ -708,7 +708,7 @@ impl App {
             Message::DecodeRequested(id, image) => {
                 if id.0 == self.state.session {
                     self.state.busy = true;
-                    self.decoder.submit(id, image);
+                    self.decoder.submit_screen(id, image);
                 }
                 Task::none()
             }

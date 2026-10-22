@@ -8,7 +8,7 @@ pub struct DecodeOutcome {
     pub result: anyhow::Result<Vec<QrResult>>,
 }
 struct Queue {
-    pending: Option<(JobId, Arc<image::GrayImage>)>,
+    pending: Option<(JobId, Arc<image::GrayImage>, bool)>,
     completed: Option<Arc<DecodeOutcome>>,
     generation: u64,
     stopped: bool,
@@ -74,7 +74,7 @@ impl Decoder {
             .spawn(move || {
                 let shared = worker_shared;
                 loop {
-                    let (id, image, generation) = {
+                    let (id, image, screen, generation) = {
                         let mut state = shared.queue.lock().expect("decoder queue");
                         while state.pending.is_none() && !state.stopped {
                             state = shared.ready.wait(state).expect("decoder queue");
@@ -82,10 +82,14 @@ impl Decoder {
                         if state.stopped {
                             break;
                         }
-                        let (id, image) = state.pending.take().expect("pending decode");
-                        (id, image, state.generation)
+                        let (id, image, screen) = state.pending.take().expect("pending decode");
+                        (id, image, screen, state.generation)
                     };
-                    let result = decode(&image);
+                    let result = if screen {
+                        crate::decode::decode_spatial(&image).map(|scan| scan.results)
+                    } else {
+                        decode(&image)
+                    };
                     let mut state = shared.queue.lock().expect("decoder queue");
                     while state.completed.is_some()
                         && state.generation == generation
@@ -110,8 +114,15 @@ impl Decoder {
     }
     /// GrayImage transfers ownership; Arc<GrayImage> shares pixels without copying.
     pub fn submit(&self, id: JobId, image: impl Into<Arc<image::GrayImage>>) {
+        self.submit_with_mode(id, image.into(), false);
+    }
+    /// Screen images use the same bounded worker with the robust screen retry.
+    pub fn submit_screen(&self, id: JobId, image: impl Into<Arc<image::GrayImage>>) {
+        self.submit_with_mode(id, image.into(), true);
+    }
+    fn submit_with_mode(&self, id: JobId, image: Arc<image::GrayImage>, screen: bool) {
         let mut state = self.shared.queue.lock().expect("decoder queue");
-        state.pending = Some((id, image.into()));
+        state.pending = Some((id, image, screen));
         self.shared.ready.notify_one();
     }
     pub fn cancel(&self) {

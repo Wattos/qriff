@@ -66,7 +66,10 @@ cargo check
 cargo clippy --all-targets -- -D warnings
 ```
 
-A normal launch opens the main window. `--background` starts in the tray when a
+A normal launch opens the main window. **Scan screen** in that window retains
+the screenshot and displays its results there. **Scan screen** from the tray
+uses the windowless flow: copy a single code with a notification, or choose from
+multiple highlighted codes. `--background` starts in the tray when a
 tray host exists, otherwise it opens the window. Closing the last window keeps
 the application alive with a tray host, and exits without one. Losing the tray
 host while hidden opens a window. Open window and Quit are in the tray menu.

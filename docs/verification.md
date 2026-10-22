@@ -397,3 +397,22 @@ it failed with four results before the fix and passes with six results and
 correct per-code coordinates after it. Existing duplicate-placement and rotated
 binary/text tests also check that retries do not add duplicate highlights.
 No new live portal, camera or physical input acceptance is claimed.
+
+### Window scan flow and README refresh (2026-10-22)
+
+The main window's Scan screen button resets a previous tray scan's windowless
+mode, retains the captured screenshot, and displays results in the window.
+Tray/instance screen scans retain the single-code notification shortcut and
+multiple-code overlay. Window screenshot decoding uses the same two-pass screen
+algorithm through the existing bounded worker; camera frames retain one pass.
+The regression checks retained pixels, the reopened window, results, and absence
+of an automatic overlay or clipboard effect under default preferences. The mixed
+version fixture also exercises the window decoder queue and recovers all six.
+All 193 tests, clippy, and the release build pass.
+
+The README now leads with a dark native interface capture. Its sample desktop
+contains three real generated QR codes, and the preview has inset spacing inside
+its card. The new multiple-result and Wi-Fi images were rendered from the actual
+Iced view with tiny-skia, using safe in-memory fixtures and production masking.
+The temporary rendering harness was removed; no fixture switch ships in the app.
+These checks did not execute real screenshot, camera, clipboard, or Wi-Fi actions.
