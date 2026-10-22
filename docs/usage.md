@@ -32,7 +32,7 @@ together and launch through `AppRun` so bundled libraries and helpers are found.
 
 `.github/workflows/linux-release.yml` tests and builds on Ubuntu 22.04, then runs
 `scripts/package-linux.sh`. Each successful build uploads an artifact containing
-an AppImage, a tar archive, and SHA256 checksums. PR builds never create releases.
+an AppImage, a tar archive, dependency sources, and SHA256 checksums. PR builds never create releases.
 
 Run **Linux bundles** manually with **draft_release** enabled to attach the
 bundles to a draft for the version in Cargo.toml. Pushing a matching `vX.Y.Z` tag

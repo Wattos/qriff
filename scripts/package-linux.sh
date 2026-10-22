@@ -43,10 +43,63 @@ export OUTPUT="$PWD/dist/$name.AppImage"
   --library /usr/lib/x86_64-linux-gnu/libX11.so.6 \
   --library /usr/lib/x86_64-linux-gnu/libXcursor.so.1 \
   --library /usr/lib/x86_64-linux-gnu/libXi.so.6 \
-  --library /usr/lib/x86_64-linux-gnu/libXrandr.so.2 --output appimage
-"$OUTPUT" --appimage-extract-and-run --help >/dev/null
+  --library /usr/lib/x86_64-linux-gnu/libXrandr.so.2
+# Preserve notices for bundled native libraries. Official builds also provide
+# their exact distribution source packages alongside the executable downloads.
+packages=(wl-clipboard)
+for library in "$appdir"/usr/lib/*.so*; do
+  base=$(basename "$library")
+  owner=$(dpkg-query -S "/usr/lib/x86_64-linux-gnu/$base" "/lib/x86_64-linux-gnu/$base" 2>/dev/null | head -n 1 | cut -d: -f1 || true)
+  [[ -n "$owner" ]] || { echo "Cannot identify bundled library: $base" >&2; exit 1; }
+  packages+=("$owner")
+done
+mapfile -t packages < <(printf '%s\n' "${packages[@]}" | sort -u)
+for package in "${packages[@]}"; do
+  install -Dm644 "/usr/share/doc/$package/copyright" "$appdir/usr/share/licenses/qriff/$package-copyright"
+done
+if [[ ${1:-} == --sources ]]; then
+  sources="$staging/native-sources"
+  mkdir -p "$sources"
+  for package in "${packages[@]}"; do
+    source_version=$(dpkg-query -W -f='${source:Package}=${source:Version}' "$package")
+    (cd "$sources" && apt-get source --download-only "$source_version")
+  done
+fi
+# Keep Rust dependency notices with the app, and include original crate archives
+# in the optional source download.
+python3 - "$appdir" "$staging/native-sources" "${1:-}" <<'PYTHON'
+import json, pathlib, shutil, subprocess, sys
+appdir, sources = map(pathlib.Path, sys.argv[1:3])
+metadata = json.loads(subprocess.check_output([
+    "cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+    "--filter-platform", "x86_64-unknown-linux-gnu",
+]))
+for package in metadata["packages"]:
+    if not (package.get("source") or "").startswith("registry+"):
+        continue
+    root = pathlib.Path(package["manifest_path"]).parent
+    identity = f'{package["name"]}-{package["version"]}'
+    dest = appdir / "usr/share/licenses/qriff/rust" / identity
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "metadata.json").write_text(json.dumps({key: package.get(key) for key in
+        ("name", "version", "license", "repository")}, indent=2) + "\n")
+    for pattern in ("LICENSE*", "LICENCE*", "COPYING*", "NOTICE*"):
+        for notice in root.glob(pattern):
+            if notice.is_file():
+                shutil.copy2(notice, dest / notice.name)
+    if sys.argv[3] == "--sources":
+        archive = root.parents[2] / "cache" / root.parent.name / f"{identity}.crate"
+        crate_dest = sources / "rust-crates"
+        crate_dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(archive, crate_dest / archive.name)
+PYTHON
+if [[ ${1:-} == --sources ]]; then
+  tar -C "$staging" -czf "dist/$name-dependency-sources.tar.gz" native-sources
+fi
+"$linuxdeploy" --appdir "$appdir" --output appimage
+APPIMAGELAUNCHER_DISABLE=1 "$OUTPUT" --appimage-extract-and-run --help >/dev/null
 "$appdir/AppRun" --help >/dev/null
 "$appdir/usr/bin/wl-copy" --version
 # The archive has the same bundled libraries and launcher, without requiring FUSE.
 tar -C "$staging" -czf "dist/$name.tar.gz" "$name"
-(cd dist && sha256sum "$name.AppImage" "$name.tar.gz" > SHA256SUMS)
+(cd dist && sha256sum "$name.AppImage" "$name"*.tar.gz > SHA256SUMS)
