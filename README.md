@@ -3,7 +3,8 @@
 A Linux-first local QR scanner built with Rust and Iced. The current shell has a
 main window, a StatusNotifierItem tray menu, and single-instance command routing.
 Scan a portal screenshot, crop a region, or scan continuously from a local camera.
-Results stay in memory and offer explicit Copy and safe HTTP/HTTPS Open actions.
+Results stay in memory and offer Copy plus explicit actions for validated web URLs,
+telephone numbers, and Wi-Fi networks.
 
 ## Build and run
 
@@ -70,6 +71,77 @@ is included. The idle shell does no camera capture or screen polling.
 Windows and macOS are future work; this build reports an explicit unsupported
 platform error there.
 
+## Interface and result actions
+
+The KDE/Breeze-style Iced window places capture controls and preview beside
+scrollable result cards. Narrow windows stack the source above the results.
+Scan screen takes a fresh quick screenshot; Select region crops the retained
+image, and Rescan decodes that same image again. Camera starts live capture;
+Stop releases it and retains the decoded results. A new source starts a fresh
+session. More contains Desktop capture… and Quit; Quit also remains in the tray.
+Settings and the status bar expose the same automatic-copy checkbox.
+
+This is an Iced approximation of Breeze, not native Qt widgets. It uses desktop
+appearance hints with light/dark fallbacks, native window decorations, and the
+software renderer. Actual native-window fixture screenshots and remaining
+physical checks are in [verification](docs/verification.md#redesigned-interface-verification-2026-10-22).
+
+Automatically copy single results defaults **off**. When enabled, an accepted
+current-session decode copies only if it introduces one new distinct payload
+and the session still contains exactly one distinct result. A multiple-code
+batch copies nothing automatically. Repeated camera frames never recopy a
+result; after another distinct code appears, choose Copy yourself. Enabling the
+setting does not copy an already displayed result. Starting a new scan resets
+this bookkeeping. Manual Copy always remains available.
+
+Both copy modes preserve the original UTF-8 QR payload (including a complete
+encoded Wi-Fi payload), or the labeled hexadecimal representation for binary
+data. Automatic copying a Wi-Fi QR therefore puts its credentials on the
+clipboard; password masking in the card does not change what Copy copies.
+
+Only preferences are persisted, in
+`$XDG_CONFIG_HOME/qr-scanner/settings.json`, or
+`$HOME/.config/qr-scanner/settings.json` when XDG_CONFIG_HOME is unset/empty.
+The preference is `auto_copy_single`, default `false`. Writes use a private
+0700 app directory, 0600 temporary file, and atomic replacement. Missing or
+corrupt settings use defaults; corrupt files are left alone until a setting is
+changed. A settings warning does not prevent scanning or discard results. No
+payloads, camera images, or scan history are saved by the scanner.
+
+Result actions run only after an explicit button click or keyboard activation;
+decoding, revealing a password, and copying never open an external application
+or request a network connection.
+
+- **Web:** Open URL accepts HTTP/HTTPS with a parsed host, without credentials
+  or control characters, and uses `xdg-open` to hand it to the desktop URI
+  handler without a shell.
+- **Telephone:** Only explicit validated `tel:` payloads offer Call number.
+  A configured desktop telephone handler and `xdg-mime` are required; that
+  application handles review and dialing. Ordinary numeric text has no calling action.
+- **Wi-Fi:** Common `WIFI:` payloads support escaped fields, hidden SSIDs, open
+  networks, WPA/WPA2 Personal, and WPA3/SAE where NetworkManager and hardware
+  support it. Passwords stay masked until Show. WEP, enterprise/EAP and unknown
+  security types remain readable/copyable with an unsupported explanation.
+  Malformed/conflicting fields do not create a connection action; malformed
+  Wi-Fi raw text is also hidden until explicitly revealed.
+
+Connect to Wi-Fi requires Linux NetworkManager with the
+`AddAndActivateConnection2` D-Bus API, an enabled managed compatible wireless
+device, and permission under the desktop's NetworkManager authorization policy.
+It may change the current network connection. Credentials go through D-Bus,
+never a command line or scanner settings. The requested profile is **volatile**,
+with `autoconnect=false`: it is not saved to disk and is removed after
+disconnection. NetworkManager manages the active connection and credentials;
+the scanner keeps no history. A pending request disables repeat activation;
+completion from an older scan cannot replace the current scan's feedback.
+
+Errors stay on the relevant card while Copy remains available: missing URI or
+telephone handler, unavailable NetworkManager, disabled Wi-Fi, no compatible
+device, unavailable network, denied authorization, rejected authentication,
+activation failure, or timeout. Provider errors are reduced to fixed messages
+so they cannot echo credentials. Actual handler and Wi-Fi availability depends
+on the desktop and system setup.
+
 ## Desktop verification checklist
 
 KDE Wayland is the first target. Check tray visibility and each menu action,
@@ -81,9 +153,11 @@ GNOME needs a StatusNotifierItem extension for a tray. Hyprland and Sway need a
 compatible panel and portal backend. On each desktop check normal launcher
 startup and closing without a tray, tray menu and host changes, command forwarding,
 screenshot permission/cancellation and camera release. These desktops have not
-been manually verified. Physical portal/crop interaction, clipboard and camera QR
-acceptance still need manual verification; native camera read/stop/reopen was
-probed on the development machine. Release measurements and the explicit acceptance matrix are in [docs/verification.md](docs/verification.md).
+been manually verified. Physical portal/crop interaction, clipboard, telephone/URL
+handoff, Wi-Fi connection and camera QR acceptance still need manual verification;
+native camera open/release was probed on the development machine. Release
+measurements and the explicit acceptance matrix are in
+[docs/verification.md](docs/verification.md).
 
 ## Camera scanning
 
