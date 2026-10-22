@@ -1,5 +1,5 @@
 use super::{
-    App, Message,
+    App, Message, focus,
     focus::Target,
     icons::{Icon, icon},
     style,
@@ -126,12 +126,15 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
                     ))
                     .size(12)
                     .width(Length::Fill),
-                    secondary(
-                        app,
-                        if revealed { "Hide" } else { "Show" },
-                        Target::Reveal(index)
+                    focus::anchor(
+                        Target::Reveal(index),
+                        secondary(
+                            app,
+                            if revealed { "Hide" } else { "Show" },
+                            Target::Reveal(index)
+                        )
+                        .on_press(Message::RevealPassword(index))
                     )
-                    .on_press(Message::RevealPassword(index))
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -144,7 +147,8 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
     if let QrContent::Invalid { kind, reason } = &result.content {
         body = body.push(text(reason).size(12));
         if matches!(kind, ContentKind::Wifi) {
-            body = body.push(
+            body = body.push(focus::anchor(
+                Target::Reveal(index),
                 secondary(
                     app,
                     if revealed {
@@ -155,7 +159,7 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
                     Target::Reveal(index),
                 )
                 .on_press(Message::RevealPassword(index)),
-            );
+            ));
         }
     }
     let mut actions = row![].spacing(8);
@@ -175,10 +179,11 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
         if !pending {
             b = b.on_press(Message::ActivateResult(index));
         }
-        actions = actions.push(b);
+        actions = actions.push(focus::anchor(Target::Activate(index), b));
     }
     body = body.push(
-        actions.push(
+        actions.push(focus::anchor(
+            Target::Copy(index),
             button(
                 row![icon(Icon::Copy), text("Copy").size(13)]
                     .spacing(7)
@@ -187,7 +192,7 @@ fn card(app: &App, index: usize) -> Element<'_, Message> {
             .padding([8, 12])
             .style(focus_style(app, Target::Copy(index), false))
             .on_press(Message::CopyResult(index)),
-        ),
+        )),
     );
     if let Some(state) = app
         .result_actions
@@ -247,7 +252,10 @@ fn source(app: &App) -> Element<'_, Message> {
                     .content_fit(iced::ContentFit::Contain),
             );
         }
-        pane = pane.push(secondary(app, "Stop camera", Target::Stop).on_press(Message::StopCamera));
+        pane = pane.push(focus::anchor(
+            Target::Stop,
+            secondary(app, "Stop camera", Target::Stop).on_press(Message::StopCamera),
+        ));
     } else if let Some(image) = &app.screenshot {
         pane = pane.push(
             container(
@@ -274,8 +282,14 @@ fn source(app: &App) -> Element<'_, Message> {
         );
         pane = pane.push(
             row![
-                secondary(app, "Select region", Target::Region).on_press(Message::SelectRegion),
-                secondary(app, "Rescan", Target::Rescan).on_press(Message::ScanFull)
+                focus::anchor(
+                    Target::Region,
+                    secondary(app, "Select region", Target::Region).on_press(Message::SelectRegion)
+                ),
+                focus::anchor(
+                    Target::Rescan,
+                    secondary(app, "Rescan", Target::Rescan).on_press(Message::ScanFull)
+                )
             ]
             .spacing(6),
         );
@@ -401,7 +415,12 @@ pub(super) fn view(app: &App, _window_id: iced::window::Id) -> Element<'_, Messa
         results = results.push(text("Several codes found. Choose a result to copy.").size(12));
     }
     let results: Element<'_, Message> = if wide(app.width) {
-        scrollable(results).spacing(12).height(Length::Fill).into()
+        scrollable(results)
+            .id(focus::RESULTS_SCROLL)
+            .on_scroll(|_| Message::ScrollInput)
+            .spacing(12)
+            .height(Length::Fill)
+            .into()
     } else {
         results.into()
     };
@@ -409,10 +428,15 @@ pub(super) fn view(app: &App, _window_id: iced::window::Id) -> Element<'_, Messa
     if wide(app.width) {
         main = main.push(
             row![
-                container(scrollable(source(app)).spacing(6))
-                    .width(Length::FillPortion(36))
-                    .height(Length::Fill)
-                    .style(style::chrome),
+                container(
+                    scrollable(source(app))
+                        .id(focus::SOURCE_SCROLL)
+                        .on_scroll(|_| Message::ScrollInput)
+                        .spacing(6)
+                )
+                .width(Length::FillPortion(36))
+                .height(Length::Fill)
+                .style(style::chrome),
                 container(results)
                     .width(Length::FillPortion(64))
                     .height(Length::Fill)
@@ -422,6 +446,8 @@ pub(super) fn view(app: &App, _window_id: iced::window::Id) -> Element<'_, Messa
     } else {
         main = main.push(
             scrollable(column![source(app), results.height(Length::Shrink)].spacing(0))
+                .id(focus::OUTER_SCROLL)
+                .on_scroll(|_| Message::ScrollInput)
                 .height(Length::Fill),
         );
     }

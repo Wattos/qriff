@@ -22,6 +22,8 @@ pub enum Message {
     Resized(f32),
     FocusNext(bool),
     KeyboardActivate,
+    FocusVisible(u64, u64, bool),
+    ScrollInput,
     UserCommand(Command),
     InstanceCommand(Command),
     TrayHostChanged(bool),
@@ -69,6 +71,8 @@ impl std::hash::Hash for PrimarySource {
 struct App {
     pub state: state::State,
     focus: Option<focus::Target>,
+    focus_ticket: u64,
+    focus_ready: bool,
     dark: bool,
     accent: iced::Color,
     width: f32,
@@ -113,6 +117,8 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                     ..Default::default()
                 },
                 focus: None,
+                focus_ticket: 0,
+                focus_ready: false,
                 dark: false,
                 accent: style::BLUE,
                 width: 1020.0,
@@ -176,6 +182,7 @@ impl App {
     /// All source switches (including camera) must invalidate decode/capture work here.
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.invalidate_source();
+        self.focus_ready = false;
         self.focus = None;
         self.revealed.clear();
         self.copy_feedback = None;
@@ -271,6 +278,21 @@ impl App {
         }
     }
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Geometry may change after feedback, a reveal or newly decoded cards.
+        // A previously confirmed viewport must not authorize an invisible action.
+        if matches!(
+            &message,
+            Message::Resized(_)
+                | Message::Copied(..)
+                | Message::ActionFinished(..)
+                | Message::RevealPassword(_)
+                | Message::DecodeFinished(_)
+                | Message::ToggleMore
+                | Message::ToggleSettings
+        ) {
+            self.focus_ready = false;
+            self.focus_ticket = self.focus_ticket.wrapping_add(1);
+        }
         match message {
             Message::Appearance(dark, accent) => {
                 self.dark = dark;
@@ -293,18 +315,35 @@ impl App {
                 }
                 Task::none()
             }
+            Message::FocusVisible(session, ticket, visible) => {
+                if session == self.state.session && ticket == self.focus_ticket {
+                    self.focus_ready = visible;
+                }
+                Task::none()
+            }
+            Message::ScrollInput => {
+                self.focus_ready = false;
+                self.focus_ticket = self.focus_ticket.wrapping_add(1);
+                Task::none()
+            }
             Message::KeyboardActivate => {
                 if let Some(target) = self.focus.filter(|t| focus::targets(self).contains(t)) {
-                    self.update(target.message(self.preferences.auto_copy_single))
+                    if self.focus_ready {
+                        self.update(target.message(self.preferences.auto_copy_single))
+                    } else {
+                        self.reveal_focus(target)
+                    }
                 } else {
                     Task::none()
                 }
             }
             Message::FocusNext(reverse) => {
-                self.focus = Some(focus::next(self, reverse));
-                Task::none()
+                let target = focus::next(self, reverse);
+                self.focus = Some(target);
+                self.reveal_focus(target)
             }
             Message::Resized(width) => {
+                self.focus_ready = false;
                 self.width = width;
                 Task::none()
             }
@@ -372,6 +411,7 @@ impl App {
                 Task::none()
             }
             Message::CancelCrop => {
+                self.focus_ready = false;
                 self.focus = None;
                 self.more_open = false;
                 self.settings_open = false;
@@ -615,6 +655,7 @@ impl App {
             return Task::none();
         };
         self.decoder.cancel();
+        self.focus_ready = false;
         self.focus = None;
         self.revealed.clear();
         let id = self.state.begin_session();
@@ -653,6 +694,14 @@ impl App {
         } else {
             "Ready"
         }
+    }
+    fn reveal_focus(&mut self, target: focus::Target) -> Task<Message> {
+        self.focus_ready = false;
+        self.focus_ticket = self.focus_ticket.wrapping_add(1);
+        let ticket = self.focus_ticket;
+        let session = self.state.session;
+        focus::reveal(target, view::wide(self.width))
+            .map(move |visible| Message::FocusVisible(session, ticket, visible))
     }
     fn view(&self, id: window::Id) -> Element<'_, Message> {
         view::view(self, id)

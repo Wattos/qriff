@@ -133,7 +133,11 @@ pub fn focused(
     };
     if focused {
         style.border = Border {
-            color: theme.palette().primary,
+            color: if primary {
+                theme.palette().text
+            } else {
+                theme.palette().primary
+            },
             width: 3.0,
             radius: 4.0.into(),
         };

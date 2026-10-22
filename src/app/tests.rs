@@ -6,6 +6,8 @@ mod capture_tests {
         App {
             state: Default::default(),
             focus: None,
+            focus_ticket: 0,
+            focus_ready: false,
             dark: false,
             accent: style::BLUE,
             width: 1020.0,
@@ -630,6 +632,11 @@ fn keyboard_focus_cycles_visible_controls_and_activates_menu_without_os_action()
         let _ = app.update(Message::FocusNext(false));
         assert_eq!(app.focus, Some(expected));
     }
+    let _ = app.update(Message::FocusVisible(
+        app.state.session,
+        app.focus_ticket,
+        true,
+    ));
     let _ = app.update(Message::KeyboardActivate);
     assert!(app.more_open);
     assert!(focus::targets(&app).contains(&focus::Target::Desktop));
@@ -654,4 +661,66 @@ fn captured_keyboard_input_does_not_activate_scanner_controls() {
         focus::key_message(&Key::Named(Named::Enter), false, Status::Ignored),
         Some(Message::KeyboardActivate)
     ));
+}
+
+#[test]
+fn offscreen_keyboard_target_cannot_activate_before_visibility_is_processed() {
+    let mut app = capture_tests::app();
+    for _ in 0..8 {
+        app.state
+            .results
+            .push(crate::results::QrResult::from_payload(
+                b"https://example.org/".to_vec(),
+            ));
+    }
+    app.focus = Some(focus::Target::Copy(6));
+    let _ = app.update(Message::FocusNext(false));
+    assert_eq!(app.focus, Some(focus::Target::Activate(7)));
+    let _ = app.update(Message::KeyboardActivate);
+    assert!(
+        app.result_actions.is_empty(),
+        "an offscreen action must wait for visibility"
+    );
+    let _ = app.update(Message::FocusVisible(
+        app.state.session,
+        app.focus_ticket,
+        true,
+    ));
+    let _ = app.update(Message::KeyboardActivate); // Task deliberately dropped: no OS action.
+    assert!(app.result_actions.contains_key(&7));
+    assert!(!app.result_actions.contains_key(&6));
+}
+
+#[test]
+fn keyboard_visibility_completion_is_session_and_traversal_aware() {
+    let mut app = capture_tests::app();
+    for _ in 0..8 {
+        app.state
+            .results
+            .push(crate::results::QrResult::from_payload(
+                b"https://example.org/".to_vec(),
+            ));
+    }
+    app.focus = Some(focus::Target::Copy(6));
+    let _ = app.update(Message::FocusNext(false));
+    let stale = app.focus_ticket;
+    let _ = app.update(Message::FocusNext(false));
+    assert_eq!(app.focus, Some(focus::Target::Copy(7)));
+    let _ = app.update(Message::FocusVisible(app.state.session, stale, true));
+    assert!(!app.focus_ready);
+    let _ = app.update(Message::FocusVisible(
+        app.state.session,
+        app.focus_ticket,
+        true,
+    ));
+    assert!(app.focus_ready);
+    assert!(matches!(
+        app.focus.unwrap().message(false),
+        Message::CopyResult(7)
+    ));
+    let _ = app.update(Message::ScrollInput);
+    assert!(!app.focus_ready);
+    let _ = app.update(Message::KeyboardActivate);
+    assert!(app.copy_feedback.is_none());
+    assert!(app.result_actions.is_empty());
 }

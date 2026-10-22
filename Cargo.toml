@@ -11,7 +11,7 @@ gpu = ["iced/wgpu"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "tokio", "wayland", "x11", "canvas", "image-without-codecs"] }
+iced = { version = "0.14", default-features = false, features = ["advanced", "tiny-skia", "tokio", "wayland", "x11", "canvas", "image-without-codecs"] }
 ksni = "0.3"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
