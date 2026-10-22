@@ -15,3 +15,5 @@ pub mod capture;
 pub mod camera;
 
 pub mod settings;
+
+pub mod actions;

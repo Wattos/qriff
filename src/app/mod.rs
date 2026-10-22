@@ -28,8 +28,12 @@ pub enum Message {
     PreferencesLoaded(crate::settings::LoadedPreferences),
     PreferencesSaved(u64, Result<(), String>),
     Copied(crate::jobs::JobId, usize),
-    OpenResult(usize),
-    OpenFailed(String),
+    ActivateResult(usize),
+    ActionFinished(
+        crate::actions::ActionKey,
+        u64,
+        Result<(), crate::actions::ActionError>,
+    ),
     CaptureFinished(
         crate::jobs::JobId,
         Result<Option<Arc<crate::capture::Prepared>>, String>,
@@ -64,6 +68,8 @@ struct App {
     settings_warning: Option<String>,
     auto_copy: clipboard::AutoCopyPolicy,
     copy_feedback: Option<(crate::jobs::JobId, usize)>,
+    result_actions: std::collections::HashMap<usize, crate::actions::ActionState>,
+    action_token: u64,
     primary: Arc<Mutex<Option<Primary>>>,
     decoder: Arc<crate::jobs::Decoder>,
     screenshot: Option<Arc<crate::capture::Prepared>>,
@@ -99,6 +105,8 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
                 settings_warning: None,
                 auto_copy: Default::default(),
                 copy_feedback: None,
+                result_actions: Default::default(),
+                action_token: 0,
                 primary: primary.clone(),
                 decoder: Arc::new(crate::jobs::Decoder::new()),
                 screenshot: None,
@@ -145,6 +153,7 @@ impl App {
     fn reset_source(&mut self) -> crate::jobs::JobId {
         self.invalidate_source();
         self.copy_feedback = None;
+        self.result_actions.clear();
         self.state.begin_session()
     }
     /// Stop capture and invalidate queued messages while retaining visible results.
@@ -382,41 +391,58 @@ impl App {
                     ))
                 })
                 .unwrap_or_else(Task::none),
-            Message::OpenResult(index) => {
-                let Some(url) =
-                    self.state
-                        .results
-                        .get(index)
-                        .and_then(|result| match result.action() {
-                            Some(crate::results::ResultAction::OpenUrl(url)) => Some(url),
-                            _ => None,
-                        })
+            Message::ActivateResult(index) => {
+                let key = crate::actions::ActionKey {
+                    session: crate::jobs::JobId(self.state.session),
+                    result_index: index,
+                };
+                if self.result_actions.get(&index).is_some_and(|state| {
+                    state.key == key
+                        && matches!(state.status, crate::actions::ActionStatus::Pending)
+                }) {
+                    return Task::none();
+                }
+                let Some(action) = self
+                    .state
+                    .results
+                    .get(index)
+                    .and_then(|result| result.action())
                 else {
                     return Task::none();
                 };
-                Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            let status = std::process::Command::new("xdg-open")
-                                .arg(url.as_str())
-                                .status()
-                                .map_err(|e| e.to_string())?;
-                            if status.success() {
-                                Ok(())
-                            } else {
-                                Err(format!("Could not open URL: {status}"))
-                            }
-                        })
-                        .await
-                        .map_err(|e| e.to_string())
-                        .and_then(|r| r)
+                self.action_token = self
+                    .action_token
+                    .checked_add(1)
+                    .expect("action request token exhausted");
+                let token = self.action_token;
+                self.result_actions.insert(
+                    index,
+                    crate::actions::ActionState {
+                        key,
+                        token,
+                        status: crate::actions::ActionStatus::Pending,
                     },
-                    |result| result.err().map(Message::OpenFailed),
-                )
-                .and_then(Task::done)
+                );
+                Task::perform(crate::actions::execute(action), move |result| {
+                    Message::ActionFinished(key, token, result)
+                })
             }
-            Message::OpenFailed(error) => {
-                self.state.error = Some(error);
+            Message::ActionFinished(key, token, outcome) => {
+                if key.session.0 == self.state.session
+                    && let Some(state) =
+                        self.result_actions
+                            .get_mut(&key.result_index)
+                            .filter(|state| {
+                                state.key == key
+                                    && state.token == token
+                                    && matches!(state.status, crate::actions::ActionStatus::Pending)
+                            })
+                {
+                    state.status = match outcome {
+                        Ok(()) => crate::actions::ActionStatus::Succeeded,
+                        Err(error) => crate::actions::ActionStatus::Failed(error),
+                    };
+                }
                 Task::none()
             }
             Message::CameraDevices(id, result) => {
@@ -563,13 +589,45 @@ impl App {
         let mut results = column![].spacing(12);
         for (index, result) in self.state.results.iter().enumerate() {
             let mut actions = row![button("Copy").on_press(Message::CopyResult(index))].spacing(8);
-            if matches!(
-                result.action(),
-                Some(crate::results::ResultAction::OpenUrl(_))
-            ) {
-                actions = actions.push(button("Open").on_press(Message::OpenResult(index)));
+            if let Some(action) = result.action() {
+                let label = match action {
+                    crate::results::ResultAction::OpenUrl(_) => "Open URL",
+                    crate::results::ResultAction::Call(_) => "Call",
+                    crate::results::ResultAction::ConnectWifi(_) => "Connect",
+                };
+                let pending = self.result_actions.get(&index).is_some_and(|state| {
+                    state.key.session.0 == self.state.session
+                        && matches!(state.status, crate::actions::ActionStatus::Pending)
+                });
+                let mut activate = button(if pending { "Working…" } else { label });
+                if !pending {
+                    activate = activate.on_press(Message::ActivateResult(index));
+                }
+                actions = actions.push(activate);
             }
-            results = results.push(column![text(&result.display_text), actions].spacing(4));
+            let mut card = column![text(&result.display_text), actions].spacing(4);
+            if let Some(state) = self
+                .result_actions
+                .get(&index)
+                .filter(|state| state.key.session.0 == self.state.session)
+            {
+                match &state.status {
+                    crate::actions::ActionStatus::Failed(error) => {
+                        card = card.push(text(error.to_string()))
+                    }
+                    crate::actions::ActionStatus::Succeeded => {
+                        card = card.push(text(
+                            if matches!(result.content, crate::results::QrContent::Wifi(_)) {
+                                "Connected. This connection is removed when disconnected."
+                            } else {
+                                "Opened in the desktop app."
+                            },
+                        ))
+                    }
+                    crate::actions::ActionStatus::Pending => {}
+                }
+            }
+            results = results.push(card);
         }
         let mut content = column![
             iced::widget::checkbox(self.preferences.auto_copy_single)
@@ -804,6 +862,8 @@ mod capture_tests {
             settings_warning: None,
             auto_copy: Default::default(),
             copy_feedback: None,
+            result_actions: Default::default(),
+            action_token: 0,
             primary: Arc::new(Mutex::new(None)),
             decoder: Arc::new(crate::jobs::Decoder::new()),
             screenshot: None,
@@ -1256,5 +1316,81 @@ mod persistence_action_tests {
         assert!(app.settings_warning.is_some());
         assert_eq!(app.state.results[0].payload, b"keep");
         assert_eq!(app.state.error.as_deref(), Some("decode failure"));
+    }
+}
+
+#[cfg(test)]
+mod explicit_action_tests {
+    use super::*;
+    #[test]
+    fn click_only_duplicate_pending_and_stale_outcomes() {
+        let mut app = super::capture_tests::app();
+        let id = app.state.begin_session();
+        let _ = app.update(Message::DecodeFinished(Arc::new(
+            crate::jobs::DecodeOutcome {
+                id,
+                result: Ok(vec![crate::results::QrResult::from_payload(
+                    b"https://example.org".to_vec(),
+                )]),
+            },
+        )));
+        assert!(app.result_actions.is_empty());
+        let _ = app.update(Message::CopyResult(0));
+        assert!(app.result_actions.is_empty());
+        assert!(app.update(Message::ActivateResult(0)).units() > 0);
+        let first = app.result_actions[&0].token;
+        assert_eq!(app.update(Message::ActivateResult(0)).units(), 0);
+        let key = crate::actions::ActionKey {
+            session: id,
+            result_index: 0,
+        };
+        app.state.error = Some("scan error".into());
+        app.settings_warning = Some("settings warning".into());
+        let _ = app.update(Message::ActionFinished(
+            key,
+            first,
+            Err(crate::actions::ActionError::Authorization),
+        ));
+        assert!(matches!(
+            app.result_actions[&0].status,
+            crate::actions::ActionStatus::Failed(_)
+        ));
+        assert_eq!(app.state.results.len(), 1);
+        assert!(app.update(Message::CopyResult(0)).units() > 0);
+        assert!(app.update(Message::ActivateResult(0)).units() > 0);
+        let next = app.result_actions[&0].token;
+        let _ = app.update(Message::ActionFinished(key, first, Ok(())));
+        assert_eq!(app.result_actions[&0].token, next);
+        assert!(matches!(
+            app.result_actions[&0].status,
+            crate::actions::ActionStatus::Pending
+        ));
+        assert_eq!(app.state.error.as_deref(), Some("scan error"));
+        assert_eq!(app.settings_warning.as_deref(), Some("settings warning"));
+        app.reset_source();
+        let _ = app.update(Message::ActionFinished(key, next, Ok(())));
+        assert!(app.result_actions.is_empty());
+    }
+    #[test]
+    fn all_typed_actions_require_explicit_click_and_plain_text_is_inert() {
+        for payload in [
+            "https://example.org",
+            "tel:+123456",
+            "WIFI:T:nopass;S:home;;",
+        ] {
+            let mut app = super::capture_tests::app();
+            app.state
+                .results
+                .push(crate::results::QrResult::from_payload(
+                    payload.as_bytes().to_vec(),
+                ));
+            assert!(app.result_actions.is_empty());
+            assert!(app.update(Message::ActivateResult(0)).units() > 0);
+        }
+        let mut app = super::capture_tests::app();
+        app.state
+            .results
+            .push(crate::results::QrResult::from_payload(b"123456".to_vec()));
+        assert_eq!(app.update(Message::ActivateResult(0)).units(), 0);
     }
 }
