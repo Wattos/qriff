@@ -20,3 +20,5 @@ pub mod actions;
 
 #[cfg(target_os = "linux")]
 pub mod desktop;
+
+pub mod overlay;
