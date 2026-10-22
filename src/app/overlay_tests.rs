@@ -847,3 +847,33 @@ fn normal_window_that_finishes_opening_during_capture_shutdown_is_closed_again()
     assert!(app.update(Message::Opened(id)).units() > 0);
     assert!(app.temporary_closes.contains(&id));
 }
+
+#[test]
+fn explicit_desktop_capture_after_tray_scan_and_open_window_restores_normal_crop_workflow() {
+    let (mut app, _, overlay) = opened();
+    drop(app.update(Message::InstanceCommand(Command::Show)));
+    drop(app.update(Message::WindowClosed(overlay)));
+    let normal = app.state.window_ids[0];
+    drop(app.update(Message::DesktopCapture));
+    let capture = crate::jobs::JobId(app.state.session);
+    assert_eq!(app.capture_mode, crate::capture::CaptureMode::Interactive);
+    assert!(app.temporary_closes.contains(&normal));
+    drop(app.update(Message::WindowClosed(normal))); // portal task stays unpolled
+    let image = Arc::new(crate::capture::Prepared::new(
+        image::DynamicImage::new_rgb8(7, 9),
+    ));
+    drop(app.update(Message::CaptureFinished(capture, Ok(Some(image.clone()))))); // native open and decoding tasks stay unpolled
+    assert_eq!(
+        app.state.window_ids.len(),
+        1,
+        "explicit capture restores the ordinary scanner window"
+    );
+    assert!(Arc::ptr_eq(app.screenshot.as_ref().unwrap(), &image));
+    assert!(app.pending_spatial.is_none());
+    assert!(app.overlay.is_none());
+    drop(app.update(Message::SelectRegion));
+    assert!(
+        app.selecting,
+        "the retained screenshot supports the ordinary crop workflow"
+    );
+}

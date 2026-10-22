@@ -607,6 +607,7 @@ impl App {
                 }
             }
             Message::DesktopCapture => {
+                self.windowless = false;
                 self.more_open = false;
                 self.begin_capture(crate::capture::CaptureMode::Interactive)
             }
