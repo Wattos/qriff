@@ -12,7 +12,7 @@ pub enum Command {
     Quit,
 }
 #[derive(Parser)]
-#[command(version, about = "Local QR scanner for Linux")]
+#[command(version, name = "qriff", about = "QRiff — local QR scanning for Linux")]
 pub struct Cli {
     #[arg(long, conflicts_with_all=["scan_screen", "scan_camera", "quit"])]
     pub background: bool,

@@ -130,6 +130,10 @@ impl App {
             fullscreen: true,
             decorations: false,
             exit_on_close_request: true,
+            platform_specific: window::settings::PlatformSpecific {
+                application_id: "qriff".into(),
+                ..Default::default()
+            },
             ..Default::default()
         });
         let mut model = crate::overlay::Model::new(session, revision, image, scan);

@@ -1,9 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=QR Scanner
+Name=QRiff
 Comment=Read QR codes locally
-Exec=qr-scanner
-Icon=qr-scanner
+Exec=qriff
+Icon=qriff
 Terminal=false
 Categories=Utility;
 StartupNotify=true
+Keywords=QR;QR Code;Scanner;Camera;Screenshot;

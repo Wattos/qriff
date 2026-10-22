@@ -151,7 +151,7 @@ impl WifiRequest {
         settings.insert(
             "connection".into(),
             HashMap::from([
-                ("id".into(), Value::from("QR Scanner Wi-Fi")),
+                ("id".into(), Value::from("QRiff Wi-Fi")),
                 ("type".into(), Value::from("802-11-wireless")),
                 ("autoconnect".into(), Value::from(false)),
             ]),

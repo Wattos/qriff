@@ -232,7 +232,7 @@ pub fn run(command: Command, primary: InstanceRole) -> iced::Result {
         App::update,
         App::view,
     )
-    .title("QR Scanner")
+    .title("QRiff")
     .default_font(iced::Font::with_name("Noto Sans"))
     .theme(|app: &App, _| style::theme(app.dark, app.accent))
     .subscription(App::subscription)
@@ -290,7 +290,18 @@ impl App {
         }
         let (id, task) = window::open(window::Settings {
             size: iced::Size::new(1020., 680.),
+            icon: image::load_from_memory(include_bytes!("../../assets/qriff-window.png"))
+                .ok()
+                .and_then(|image| {
+                    let image = image.into_rgba8();
+                    let (width, height) = image.dimensions();
+                    window::icon::from_rgba(image.into_raw(), width, height).ok()
+                }),
             exit_on_close_request: true,
+            platform_specific: window::settings::PlatformSpecific {
+                application_id: "qriff".into(),
+                ..Default::default()
+            },
             ..Default::default()
         });
         self.state.window_ids.push(id);
@@ -1106,7 +1117,7 @@ impl App {
                     .capture_error
                     .filter(|error| self.state.error.as_deref() == Some(error.message()))
                     .map_or(
-                        "Could not scan. Try again or open QR Scanner for details.",
+                        "Could not scan. Try again or open QRiff for details.",
                         |error| error.message(),
                     )
                     .into(),

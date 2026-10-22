@@ -133,8 +133,23 @@ async fn notifications_on(
                 } else {
                     vec![]
                 };
+                let icon = image::load_from_memory(include_bytes!("../assets/qriff-window.png"))
+                    .expect("embedded QRiff notification icon")
+                    .into_rgba8();
+                let (width, height) = icon.dimensions();
+                let image_hint = zbus::zvariant::Value::from((
+                    width as i32,
+                    height as i32,
+                    (width * 4) as i32,
+                    true,
+                    8i32,
+                    4i32,
+                    icon.into_raw(),
+                ));
                 let hints: std::collections::HashMap<&str, zbus::zvariant::Value<'_>> =
                     std::collections::HashMap::from([
+                        ("image-data", image_hint),
+                        ("desktop-entry", zbus::zvariant::Value::from("qriff")),
                         ("transient", zbus::zvariant::Value::from(true)),
                         ("category", zbus::zvariant::Value::from("transfer.complete")),
                     ]);
@@ -149,9 +164,9 @@ async fn notifications_on(
                     proxy.call::<_, _, u32>(
                         "Notify",
                         &(
-                            "QR Scanner",
+                            "QRiff",
                             id,
-                            "view-barcode-qr",
+                            "qriff",
                             &notice.title,
                             body,
                             buttons,

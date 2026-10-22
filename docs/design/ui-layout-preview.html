@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>QR Scanner — proposed layout</title>
+<title>QRiff — proposed layout</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#dde2e7;color:#232629;font:14px "Noto Sans",system-ui,sans-serif;--surface:#fcfcfc;--chrome:#eff0f1;--border:#c8cdd1;--muted:#64717c;--blue:#2980b9;--hover:#e2f1fa;--text:#232629;--success:#237c51;min-height:100vh;padding:32px 24px}
 body.dark{background:#171b20;--surface:#232629;--chrome:#31363b;--border:#51575d;--muted:#b1bac3;--blue:#3daee9;--hover:#25465a;--text:#eff0f1;--success:#79cda3;color:var(--text)}
@@ -32,11 +32,11 @@ button,input{font:inherit}button{cursor:pointer;color:inherit}button:focus-visib
 <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="1"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
 </defs></svg>
 <header class="preview-bar">
- <div><div class="preview-title">Proposed QR Scanner layout</div><div class="preview-sub">Interactive design mockup · KDE / Breeze direction · no real capture or external actions</div></div>
+ <div><div class="preview-title">Proposed QRiff layout</div><div class="preview-sub">Interactive design mockup · KDE / Breeze direction · no real capture or external actions</div></div>
  <div class="controls"><button data-state="website" class="active">Website</button><button data-state="phone">Phone</button><button data-state="wifi">Wi-Fi</button><button data-state="multiple">Multiple codes</button><button id="theme-toggle" aria-label="Toggle dark appearance">◐ Theme</button></div>
 </header>
 <main class="window">
- <div class="titlebar"><div class="window-name"><svg class="icon" style="width:15px;height:15px"><use href="#scan"/></svg>QR Scanner</div><div class="window-controls" aria-hidden="true"><span>−</span><span>□</span><span>×</span></div></div>
+ <div class="titlebar"><div class="window-name"><svg class="icon" style="width:15px;height:15px"><use href="#scan"/></svg>QRiff</div><div class="window-controls" aria-hidden="true"><span>−</span><span>□</span><span>×</span></div></div>
  <div class="toolbar"><div class="tools"><button class="button primary" id="scan-button"><svg class="icon"><use href="#scan"/></svg>Scan screen</button><button class="button" id="camera-button"><svg class="icon"><use href="#camera"/></svg>Camera</button><div class="divider"></div><button class="button flat" id="more-button" aria-label="More capture options">More <span class="arrow">▾</span></button></div>
  <div class="settings-wrap"><button class="button flat" id="settings-button"><svg class="icon"><use href="#gear"/></svg>Settings</button><div class="settings-panel" id="settings-panel"><h3>Scan preferences</h3><label class="setting-label"><input type="checkbox" id="settings-auto" checked>Automatically copy single results</label><p>Copy when a scan finds one QR code. When there are several, choose a result to copy.</p><label class="setting-label"><input type="checkbox" id="settings-dark">Dark appearance</label><p>The app will follow your system appearance. This switch previews the dark layout.</p><div class="settings-note">Opening links, calling, and connecting to Wi-Fi always require a click.</div></div></div></div>
  <div class="workspace"><aside class="source-pane"><h2 class="pane-heading"><span id="source-title">Captured screen</span><span class="badge" id="source-badge">Screen</span></h2><div class="capture"><div class="mini-browser"><span class="dot"></span><span class="dot"></span><span class="dot"></span><div class="address"></div></div><div class="capture-scene"><strong id="capture-title">Discover KDE</strong><svg class="qr" id="qr-preview" viewBox="0 0 33 33"></svg><span id="capture-subtitle">Scan to visit kde.org</span></div></div><div class="source-meta">1920 × 1080 <span>·</span> Captured just now</div><div class="source-actions"><button class="button" id="region-button"><svg class="icon" style="width:15px;height:15px"><use href="#crop"/></svg>Select region</button><button class="button" id="rescan-button">Rescan</button></div><p class="source-hint">Need a specific code?<br>Select a region in the captured image to narrow the scan.</p><div class="source-footer"><svg class="icon" style="width:14px;height:14px"><use href="#lock"/></svg>Processed locally on your device</div></aside>

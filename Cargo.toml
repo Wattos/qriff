@@ -1,7 +1,14 @@
 [package]
-name = "qr-scanner"
+name = "qriff"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A fast local QR code scanner for Linux desktops"
+repository = "https://github.com/Wattos/qriff"
+
+# Keep the library name stable for existing integrations and benchmarks.
+[lib]
+name = "qr_scanner"
 
 [features]
 # Optional comparison backend; tiny-skia remains available as a fallback.
